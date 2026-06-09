@@ -1,0 +1,20 @@
+# .gitignore
+node_modules/
+dist/
+.next/
+coverage/
+*.log
+
+# Rust build output
+target/
+services/matching-engine/target/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/

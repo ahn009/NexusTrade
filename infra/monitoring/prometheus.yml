@@ -1,0 +1,12 @@
+# infra/monitoring/prometheus.yml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: nexustrade-services
+    static_configs:
+      - targets:
+          - api-gateway:3000
+          - trading-service:3003
+          - wallet-service:3004
+          - market-data-service:3005

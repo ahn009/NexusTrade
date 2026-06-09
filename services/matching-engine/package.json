@@ -1,0 +1,10 @@
+{
+  "name": "@nexus/matching-engine",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "cargo build --manifest-path Cargo.toml",
+    "test": "cargo test --manifest-path Cargo.toml",
+    "start:dev": "cargo run --manifest-path Cargo.toml"
+  }
+}

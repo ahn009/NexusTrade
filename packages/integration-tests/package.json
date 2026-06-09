@@ -1,0 +1,13 @@
+{
+  "name": "@nexus/integration-tests",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --config jest.config.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nexus/shared": "0.1.0"
+  }
+}

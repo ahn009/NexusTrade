@@ -1,0 +1,76 @@
+// packages/shared/src/proto/matching.proto
+syntax = "proto3";
+
+package nexus.matching;
+
+service MatchingEngine {
+  rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc GetOrderBook(GetOrderBookRequest) returns (GetOrderBookResponse);
+  rpc GetOrderStatus(GetOrderStatusRequest) returns (GetOrderStatusResponse);
+}
+
+message SubmitOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+  string symbol = 3;
+  string side = 4;
+  string order_type = 5;
+  string price = 6;
+  string quantity = 7;
+  string client_order_id = 8;
+}
+
+message SubmitOrderResponse {
+  string order_id = 1;
+  bool accepted = 2;
+  string status = 3;
+  repeated Fill fills = 4;
+  string reject_reason = 5;
+}
+
+message CancelOrderRequest {
+  string order_id = 1;
+  string symbol = 2;
+  string user_id = 3;
+}
+
+message CancelOrderResponse {
+  bool cancelled = 1;
+}
+
+message GetOrderBookRequest {
+  string symbol = 1;
+  uint32 depth = 2;
+}
+
+message PriceLevel {
+  string price = 1;
+  string quantity = 2;
+}
+
+message GetOrderBookResponse {
+  repeated PriceLevel bids = 1;
+  repeated PriceLevel asks = 2;
+}
+
+message GetOrderStatusRequest {
+  string order_id = 1;
+  string symbol = 2;
+}
+
+message GetOrderStatusResponse {
+  string order_id = 1;
+  string status = 2;
+  string filled_quantity = 3;
+}
+
+message Fill {
+  string trade_id = 1;
+  string maker_order_id = 2;
+  string taker_order_id = 3;
+  string maker_user_id = 4;
+  string taker_user_id = 5;
+  string price = 6;
+  string quantity = 7;
+}
