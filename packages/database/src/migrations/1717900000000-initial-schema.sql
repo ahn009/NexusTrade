@@ -158,6 +158,35 @@ CREATE TABLE sessions (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE withdrawal_addresses (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id),
+  asset varchar(16) NOT NULL,
+  network varchar(32) NOT NULL,
+  address varchar(180) NOT NULL,
+  label varchar(120),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, asset, network, address)
+);
+
+CREATE TABLE referrals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  referrer_id uuid NOT NULL REFERENCES users(id),
+  referred_user_id uuid NOT NULL REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (referrer_id, referred_user_id)
+);
+
+CREATE TABLE notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel varchar(16) NOT NULL,
+  recipient varchar(240) NOT NULL,
+  template varchar(120) NOT NULL,
+  message text NOT NULL,
+  status varchar(24) NOT NULL DEFAULT 'queued',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX orders_symbol_status_created_idx ON orders(symbol, status, created_at);
 CREATE INDEX orders_user_created_idx ON orders(user_id, created_at);
 CREATE INDEX orders_client_order_id_idx ON orders(client_order_id);
@@ -170,3 +199,6 @@ CREATE INDEX deposits_tx_hash_idx ON deposits(tx_hash);
 CREATE INDEX withdrawals_user_created_idx ON withdrawals(user_id, created_at);
 CREATE INDEX audit_aggregate_created_idx ON audit_logs(aggregate_id, created_at);
 CREATE INDEX sessions_user_id_idx ON sessions(user_id);
+CREATE INDEX withdrawal_addresses_user_id_idx ON withdrawal_addresses(user_id);
+CREATE INDEX referrals_referrer_id_idx ON referrals(referrer_id);
+CREATE INDEX notifications_recipient_created_idx ON notifications(recipient, created_at);

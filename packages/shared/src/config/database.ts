@@ -9,12 +9,15 @@ export function getDatabaseEntities(): Function[] {
     databasePackage.DepositEntity,
     databasePackage.KycRecordEntity,
     databasePackage.LedgerTransactionEntity,
+    databasePackage.NotificationEntity,
     databasePackage.OrderEntity,
+    databasePackage.ReferralEntity,
     databasePackage.SessionEntity,
     databasePackage.TradeEntity,
     databasePackage.UserEntity,
     databasePackage.UserProfileEntity,
     databasePackage.WalletEntity,
+    databasePackage.WithdrawalAddressEntity,
     databasePackage.WithdrawalEntity
   ];
 }

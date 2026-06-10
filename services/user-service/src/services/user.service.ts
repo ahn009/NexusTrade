@@ -1,7 +1,7 @@
 // services/user-service/src/services/user.service.ts
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { KycRecordEntity, UserEntity, UserProfileEntity } from '@nexus/database';
+import { KycRecordEntity, ReferralEntity, UserEntity, UserProfileEntity, WithdrawalAddressEntity } from '@nexus/database';
 import { AccountTier, createEvent, EventType, KafkaService, KafkaTopics, KycLevel, KycStatus, UserStatus } from '@nexus/shared';
 import { Repository } from 'typeorm';
 import { AddressBookDto, KycDto, ProfileDto } from '../dto/user.dto';
@@ -9,13 +9,13 @@ import { AddressBookDto, KycDto, ProfileDto } from '../dto/user.dto';
 @Injectable()
 export class UserService implements OnModuleInit {
   private readonly logger = new Logger(UserService.name);
-  private referrals = new Map<string, string[]>();
-  private addressBook = new Map<string, AddressBookDto[]>();
 
   constructor(
     @InjectRepository(UserEntity) private readonly users: Repository<UserEntity>,
     @InjectRepository(UserProfileEntity) private readonly profiles: Repository<UserProfileEntity>,
     @InjectRepository(KycRecordEntity) private readonly kyc: Repository<KycRecordEntity>,
+    @InjectRepository(ReferralEntity) private readonly referrals: Repository<ReferralEntity>,
+    @InjectRepository(WithdrawalAddressEntity) private readonly addresses: Repository<WithdrawalAddressEntity>,
     private readonly kafka: KafkaService
   ) {}
 
@@ -76,17 +76,21 @@ export class UserService implements OnModuleInit {
     return { userId, tier };
   }
 
-  addReferral(referrerId: string, referredUserId: string) {
-    const list = this.referrals.get(referrerId) ?? [];
-    list.push(referredUserId);
-    this.referrals.set(referrerId, list);
-    return { referrerId, referredCount: list.length };
+  async addReferral(referrerId: string, referredUserId: string) {
+    const existing = await this.referrals.findOne({ where: { referrerId, referredUserId } });
+    if (!existing) {
+      await this.referrals.save(this.referrals.create({ referrerId, referredUserId }));
+    }
+    const referredCount = await this.referrals.count({ where: { referrerId } });
+    return { referrerId, referredCount };
   }
 
-  addWithdrawalAddress(userId: string, dto: AddressBookDto) {
-    const entries = this.addressBook.get(userId) ?? [];
-    entries.push(dto);
-    this.addressBook.set(userId, entries);
-    return { userId, addresses: entries };
+  async addWithdrawalAddress(userId: string, dto: AddressBookDto) {
+    const existing = await this.addresses.findOne({ where: { userId, asset: dto.asset, network: dto.network, address: dto.address } });
+    if (!existing) {
+      await this.addresses.save(this.addresses.create({ userId, ...dto }));
+    }
+    const addresses = await this.addresses.find({ where: { userId }, order: { createdAt: 'DESC' } });
+    return { userId, addresses };
   }
 }

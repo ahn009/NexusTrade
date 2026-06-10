@@ -15,8 +15,8 @@ export class WithdrawalController {
   }
 
   @Post('withdrawals/whitelist/:userId')
-  whitelist(@Param('userId') userId: string, @Body('address') address: string) {
-    return this.withdrawals.whitelist(userId, address);
+  whitelist(@Param('userId') userId: string, @Body() body: { asset?: string; network?: string; address: string; label?: string }) {
+    return this.withdrawals.whitelist(userId, body);
   }
 
   @Post('withdrawals')

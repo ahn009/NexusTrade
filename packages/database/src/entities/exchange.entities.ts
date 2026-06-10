@@ -399,3 +399,71 @@ export class SessionEntity {
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 }
+
+@Entity('withdrawal_addresses')
+@Unique(['userId', 'asset', 'network', 'address'])
+@Index(['userId'])
+export class WithdrawalAddressEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @Column({ name: 'user_id', type: 'uuid' })
+  userId!: string;
+
+  @Column({ type: 'varchar', length: 16 })
+  asset!: string;
+
+  @Column({ type: 'varchar', length: 32 })
+  network!: string;
+
+  @Column({ type: 'varchar', length: 180 })
+  address!: string;
+
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  label?: string | null;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt!: Date;
+}
+
+@Entity('referrals')
+@Unique(['referrerId', 'referredUserId'])
+@Index(['referrerId'])
+export class ReferralEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @Column({ name: 'referrer_id', type: 'uuid' })
+  referrerId!: string;
+
+  @Column({ name: 'referred_user_id', type: 'uuid' })
+  referredUserId!: string;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt!: Date;
+}
+
+@Entity('notifications')
+@Index(['recipient', 'createdAt'])
+export class NotificationEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @Column({ type: 'varchar', length: 16 })
+  channel!: 'email' | 'sms' | 'push' | 'in_app';
+
+  @Column({ type: 'varchar', length: 240 })
+  recipient!: string;
+
+  @Column({ type: 'varchar', length: 120 })
+  template!: string;
+
+  @Column({ type: 'text' })
+  message!: string;
+
+  @Column({ type: 'varchar', length: 24, default: 'queued' })
+  status!: 'queued' | 'sent' | 'failed';
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt!: Date;
+}

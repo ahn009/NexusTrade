@@ -1,7 +1,7 @@
 // services/withdrawal-service/src/services/withdrawal.service.ts
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { WithdrawalEntity } from '@nexus/database';
+import { WithdrawalAddressEntity, WithdrawalEntity } from '@nexus/database';
 import { randomUUID } from 'crypto';
 import { createEvent, EventType, KafkaService, KafkaTopics, money, TransactionStatus, Withdrawal } from '@nexus/shared';
 import { Repository } from 'typeorm';
@@ -9,30 +9,31 @@ import { WithdrawalDto } from '../dto/withdrawal.dto';
 
 @Injectable()
 export class WithdrawalService {
-  private whitelisted = new Map<string, Map<string, number>>();
   private readonly authUrl = process.env.AUTH_SERVICE_URL ?? 'http://localhost:3001';
   private readonly walletUrl = process.env.WALLET_SERVICE_URL ?? 'http://localhost:3004';
 
   constructor(
     @InjectRepository(WithdrawalEntity) private readonly withdrawals: Repository<WithdrawalEntity>,
+    @InjectRepository(WithdrawalAddressEntity) private readonly addresses: Repository<WithdrawalAddressEntity>,
     private readonly kafka: KafkaService
   ) {}
 
-  whitelist(userId: string, address: string) {
-    const addresses = this.whitelisted.get(userId) ?? new Map<string, number>();
-    addresses.set(address, Date.now());
-    this.whitelisted.set(userId, addresses);
-    return { userId, address, whitelisted: true };
+  async whitelist(userId: string, body: { asset?: string; network?: string; address: string; label?: string }) {
+    const asset = body.asset ?? 'USDT';
+    const network = body.network ?? 'ETH';
+    const existing = await this.addresses.findOne({ where: { userId, asset, network, address: body.address } });
+    const entry = existing ?? await this.addresses.save(this.addresses.create({ userId, asset, network, address: body.address, label: body.label ?? 'Withdrawal whitelist' }));
+    return { userId, address: entry.address, whitelisted: true, createdAt: entry.createdAt };
   }
 
   async request(dto: WithdrawalDto) {
     await this.verifyTotp(dto.userId, dto.totpCode);
-    const whitelistedAt = this.whitelisted.get(dto.userId)?.get(dto.address);
-    if (!whitelistedAt) {
+    const whitelistedAddress = await this.addresses.findOne({ where: { userId: dto.userId, asset: dto.asset, network: dto.network, address: dto.address } });
+    if (!whitelistedAddress) {
       throw new HttpException('withdrawal address is not whitelisted', HttpStatus.FORBIDDEN);
     }
     const cooldownMs = Number(process.env.WITHDRAWAL_WHITELIST_COOLDOWN_MS ?? String(24 * 60 * 60 * 1000));
-    if (Date.now() - whitelistedAt < cooldownMs) {
+    if (Date.now() - whitelistedAddress.createdAt.getTime() < cooldownMs) {
       throw new HttpException('withdrawal address cooldown is active', HttpStatus.FORBIDDEN);
     }
     const amount = money(dto.amount);
