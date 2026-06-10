@@ -1,13 +1,14 @@
 // services/user-service/src/services/user.service.ts
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { KycRecordEntity, UserEntity, UserProfileEntity } from '@nexus/database';
-import { AccountTier, createEvent, EventType, KafkaService, KafkaTopics, KycLevel, KycStatus } from '@nexus/shared';
+import { AccountTier, createEvent, EventType, KafkaService, KafkaTopics, KycLevel, KycStatus, UserStatus } from '@nexus/shared';
 import { Repository } from 'typeorm';
 import { AddressBookDto, KycDto, ProfileDto } from '../dto/user.dto';
 
 @Injectable()
-export class UserService {
+export class UserService implements OnModuleInit {
+  private readonly logger = new Logger(UserService.name);
   private referrals = new Map<string, string[]>();
   private addressBook = new Map<string, AddressBookDto[]>();
 
@@ -17,6 +18,25 @@ export class UserService {
     @InjectRepository(KycRecordEntity) private readonly kyc: Repository<KycRecordEntity>,
     private readonly kafka: KafkaService
   ) {}
+
+  async onModuleInit() {
+    await this.kafka.consume<{ eventType: EventType; payload: { userId: string; email: string; status?: UserStatus } }>({
+      topic: KafkaTopics.Users,
+      groupId: 'user-service'
+    }, async (event) => {
+      if (event.eventType !== EventType.UserRegistered) return;
+      const existing = await this.users.findOne({ where: { id: event.payload.userId } });
+      if (!existing) {
+        await this.users.save(this.users.create({
+          id: event.payload.userId,
+          email: event.payload.email,
+          passwordHash: 'external-auth-service',
+          status: event.payload.status ?? UserStatus.Active,
+          referralCode: event.payload.userId.replace(/-/g, '').slice(0, 12)
+        }));
+      }
+    }).catch((error) => this.logger.warn(`Kafka consumer unavailable: ${(error as Error).message}`));
+  }
 
   async upsertProfile(userId: string, dto: ProfileDto) {
     const existing = await this.profiles.findOne({ where: { userId } });

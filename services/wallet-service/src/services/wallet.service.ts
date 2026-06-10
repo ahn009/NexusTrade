@@ -1,7 +1,7 @@
 // services/wallet-service/src/services/wallet.service.ts
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { LedgerTransactionEntity, WalletEntity } from '@nexus/database';
-import { add, assertNonNegative, money, subtract, TransactionStatus, TransactionType, WalletType } from '@nexus/shared';
+import { add, assertNonNegative, Deposit, EventType, KafkaEvent, KafkaService, KafkaTopics, money, subtract, TransactionStatus, TransactionType, WalletType, Withdrawal } from '@nexus/shared';
 import { DataSource, EntityManager } from 'typeorm';
 import { BalanceLeg, BalanceMutationDto, SettlementDto } from '../dto/wallet.dto';
 
@@ -11,11 +11,26 @@ export class WalletService implements OnModuleInit {
   private balances = new Map<string, { available: string; locked: string }>();
   private ledger: unknown[] = [];
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(private readonly dataSource: DataSource, private readonly kafka: KafkaService) {}
 
   async onModuleInit() {
     if (process.env.WALLET_STORE === 'memory') this.logger.warn('wallet memory store requested; TypeORM remains configured by DatabaseModule');
     this.logger.log('wallet persistence enabled with shared DatabaseModule');
+    await this.kafka.consume<KafkaEvent<Deposit>>({ topic: KafkaTopics.Deposits, groupId: 'wallet-service' }, async (event) => {
+      if (event.eventType === EventType.DepositConfirmed && event.payload.status === TransactionStatus.Confirmed) {
+        await this.credit({ userId: event.payload.userId, asset: event.payload.asset, amount: event.payload.amount, referenceId: event.payload.id }, TransactionType.Deposit);
+      }
+    }).catch((error) => this.logger.warn(`deposit consumer unavailable: ${(error as Error).message}`));
+    await this.kafka.consume<KafkaEvent<Withdrawal>>({ topic: KafkaTopics.Withdrawals, groupId: 'wallet-service' }, async (event) => {
+      if (event.eventType === EventType.WithdrawalApproved && event.payload.status === TransactionStatus.Confirmed) {
+        await this.debit({
+          userId: event.payload.userId,
+          asset: event.payload.asset,
+          amount: money(event.payload.amount).plus(event.payload.fee).toFixed(),
+          referenceId: event.payload.id
+        }, TransactionType.Withdrawal);
+      }
+    }).catch((error) => this.logger.warn(`withdrawal consumer unavailable: ${(error as Error).message}`));
   }
 
   async getBalance(userId: string, asset: string) {
@@ -50,6 +65,23 @@ export class WalletService implements OnModuleInit {
     current.available = add(current.available, dto.amount);
     this.balances.set(key, current);
     return this.record(dto, type, current.available);
+  }
+
+  async debit(dto: BalanceMutationDto, type: TransactionType = TransactionType.Withdrawal) {
+    if (this.dataSource) {
+      return this.withTransaction(async (manager) => {
+        const wallet = await this.adjustAvailable(manager, dto.userId, dto.asset, money(dto.amount).negated().toFixed());
+        await this.recordTypeOrm(manager, { ...dto, amount: money(dto.amount).negated().toFixed() }, type, wallet.available);
+        return { ...dto, type, balanceAfter: wallet.available, createdAt: new Date().toISOString() };
+      });
+    }
+    const key = `${dto.userId}:${dto.asset}`;
+    const current = this.balances.get(key) ?? { available: '0', locked: '0' };
+    const next = subtract(current.available, dto.amount);
+    assertNonNegative(next, 'available');
+    current.available = next;
+    this.balances.set(key, current);
+    return this.record({ ...dto, amount: money(dto.amount).negated().toFixed() }, type, current.available);
   }
 
   async lock(dto: BalanceMutationDto) {

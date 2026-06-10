@@ -1,13 +1,26 @@
 // services/compliance-service/src/services/compliance.service.ts
-import { Injectable } from '@nestjs/common';
-import { createEvent, EventType, KafkaService, KafkaTopics, money } from '@nexus/shared';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { createEvent, EventType, KafkaEvent, KafkaService, KafkaTopics, money, Withdrawal } from '@nexus/shared';
 import { TransactionScreenDto } from '../dto/compliance.dto';
 
 @Injectable()
-export class ComplianceService {
+export class ComplianceService implements OnModuleInit {
+  private readonly logger = new Logger(ComplianceService.name);
   private watchlist = new Set(['blocked-address', 'sanctioned-entity']);
 
   constructor(private readonly kafka: KafkaService) {}
+
+  async onModuleInit() {
+    await this.kafka.consume<KafkaEvent<Withdrawal>>({ topic: KafkaTopics.Withdrawals, groupId: 'compliance-service' }, async (event) => {
+      if (event.eventType !== EventType.WithdrawalRequested) return;
+      await this.screen({
+        userId: event.payload.userId,
+        asset: event.payload.asset,
+        amountUsd: event.payload.amount,
+        counterparty: event.payload.address
+      });
+    }).catch((error) => this.logger.warn(`withdrawal consumer unavailable: ${(error as Error).message}`));
+  }
 
   async screen(dto: TransactionScreenDto) {
     const highValue = money(dto.amountUsd).gte('10000');
