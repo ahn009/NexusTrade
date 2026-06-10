@@ -8,6 +8,7 @@ import { WithdrawalDto } from '../dto/withdrawal.dto';
 export class WithdrawalService {
   private withdrawals: Withdrawal[] = [];
   private whitelisted = new Map<string, Set<string>>();
+  private readonly authUrl = process.env.AUTH_SERVICE_URL ?? 'http://localhost:3001';
 
   constructor(private readonly kafka: KafkaService) {}
 
@@ -19,6 +20,7 @@ export class WithdrawalService {
   }
 
   async request(dto: WithdrawalDto) {
+    await this.verifyTotp(dto.userId, dto.totpCode);
     if (!this.whitelisted.get(dto.userId)?.has(dto.address)) {
       throw new HttpException('withdrawal address is not whitelisted', HttpStatus.FORBIDDEN);
     }
@@ -52,5 +54,26 @@ export class WithdrawalService {
 
   list(userId?: string) {
     return userId ? this.withdrawals.filter((withdrawal) => withdrawal.userId === userId) : this.withdrawals;
+  }
+
+  private async verifyTotp(userId: string, code: string) {
+    if (process.env.WITHDRAWAL_TOTP_REQUIRED === 'false') return;
+    const response = await fetch(`${this.authUrl}/auth/totp/verify`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(process.env.SERVICE_AUTH_TOKEN ? { 'x-service-token': process.env.SERVICE_AUTH_TOKEN } : {})
+      },
+      body: JSON.stringify({ userId, code })
+    }).catch((error: Error) => {
+      throw new HttpException(`totp verification unavailable: ${error.message}`, HttpStatus.SERVICE_UNAVAILABLE);
+    });
+    if (!response.ok) {
+      throw new HttpException('totp verification failed', HttpStatus.UNAUTHORIZED);
+    }
+    const payload = await response.json().catch(() => ({ verified: false }));
+    if (!payload.verified) {
+      throw new HttpException('invalid totp code', HttpStatus.UNAUTHORIZED);
+    }
   }
 }

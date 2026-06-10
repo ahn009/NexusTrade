@@ -1,5 +1,6 @@
 // services/trading-service/src/controllers/trading.controller.ts
 import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { Public } from '@nexus/shared';
 import { PlaceOrderDto } from '../dto/trading.dto';
 import { TradingService } from '../services/trading.service';
 
@@ -7,6 +8,7 @@ import { TradingService } from '../services/trading.service';
 export class TradingController {
   constructor(private readonly trading: TradingService) {}
 
+  @Public()
   @Get('health')
   health() {
     return { status: 'ok', service: 'trading-service' };

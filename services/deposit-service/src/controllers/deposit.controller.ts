@@ -1,5 +1,6 @@
 // services/deposit-service/src/controllers/deposit.controller.ts
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Public } from '@nexus/shared';
 import { AddressRequestDto, SimulateDepositDto } from '../dto/deposit.dto';
 import { DepositService } from '../services/deposit.service';
 
@@ -7,6 +8,7 @@ import { DepositService } from '../services/deposit.service';
 export class DepositController {
   constructor(private readonly deposits: DepositService) {}
 
+  @Public()
   @Get('health')
   health() {
     return { status: 'ok', service: 'deposit-service' };

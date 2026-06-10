@@ -1,5 +1,6 @@
 // services/compliance-service/src/controllers/compliance.controller.ts
 import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Public } from '@nexus/shared';
 import { TransactionScreenDto } from '../dto/compliance.dto';
 import { ComplianceService } from '../services/compliance.service';
 
@@ -7,6 +8,7 @@ import { ComplianceService } from '../services/compliance.service';
 export class ComplianceController {
   constructor(private readonly compliance: ComplianceService) {}
 
+  @Public()
   @Get('health')
   health() {
     return { status: 'ok', service: 'compliance-service' };

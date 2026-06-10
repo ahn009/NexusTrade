@@ -1,5 +1,6 @@
 // services/market-data-service/src/main.ts
 import 'reflect-metadata';
+import { ValidationPipe } from '@nestjs/common';
 import { Controller, Get, Module, Param, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
@@ -68,6 +69,7 @@ class MarketDataModule {}
 
 async function bootstrap() {
   const app = await NestFactory.create(MarketDataModule);
+  app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
   app.enableCors();
   await app.listen(process.env.PORT ? Number(process.env.PORT) : 3005);
 }

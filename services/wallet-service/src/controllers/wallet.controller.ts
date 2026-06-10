@@ -1,5 +1,6 @@
 // services/wallet-service/src/controllers/wallet.controller.ts
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Public } from '@nexus/shared';
 import { BalanceMutationDto, SettlementDto } from '../dto/wallet.dto';
 import { WalletService } from '../services/wallet.service';
 
@@ -7,6 +8,7 @@ import { WalletService } from '../services/wallet.service';
 export class WalletController {
   constructor(private readonly wallet: WalletService) {}
 
+  @Public()
   @Get('health')
   health() {
     return { status: 'ok', service: 'wallet-service' };

@@ -1,6 +1,7 @@
 // packages/shared/src/index.ts
 export * from './types/domain';
 export * from './events/kafka';
+export * from './auth/jwt-auth.guard';
 export * from './config/database';
 export * from './modules/DatabaseModule';
 export * from './modules/KafkaModule';

@@ -1,5 +1,6 @@
 // services/withdrawal-service/src/controllers/withdrawal.controller.ts
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Public } from '@nexus/shared';
 import { WithdrawalDto } from '../dto/withdrawal.dto';
 import { WithdrawalService } from '../services/withdrawal.service';
 
@@ -7,6 +8,7 @@ import { WithdrawalService } from '../services/withdrawal.service';
 export class WithdrawalController {
   constructor(private readonly withdrawals: WithdrawalService) {}
 
+  @Public()
   @Get('health')
   health() {
     return { status: 'ok', service: 'withdrawal-service' };

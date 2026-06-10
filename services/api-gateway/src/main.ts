@@ -1,20 +1,39 @@
 // services/api-gateway/src/main.ts
 import 'reflect-metadata';
-import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, Injectable, Module, Post, Query, UseGuards } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, Injectable, Module, Post, Query, UnauthorizedException, UseGuards, ValidationPipe } from '@nestjs/common';
+import { NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { extractBearerToken, Public, verifyJwtToken } from '@nexus/shared';
 
 @Injectable()
-class ApiKeyGuard implements CanActivate {
+class GatewayAuthGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
   canActivate(context: ExecutionContext): boolean {
+    const isPublic = this.reflector.getAllAndOverride<boolean>('isPublicRoute', [context.getHandler(), context.getClass()]);
+    if (isPublic) return true;
+
     const req = context.switchToHttp().getRequest();
-    const publicKey = req.headers['x-api-key'];
-    const signature = req.headers['x-signature'];
-    if (!publicKey && !signature) return true;
-    const secret = process.env.API_KEY_SECRET ?? 'dev-api-secret';
-    const expected = createHmac('sha256', secret).update(`${req.method}:${req.url}`).digest('hex');
-    return typeof signature === 'string' && timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    const bearer = extractBearerToken(req.headers.authorization);
+    if (bearer) {
+      req.user = verifyJwtToken(bearer);
+      return true;
+    }
+
+    if (this.hasValidApiSignature(req.method, req.url, req.headers['x-api-key'], req.headers['x-signature'])) {
+      return true;
+    }
+    throw new UnauthorizedException('valid JWT or API signature is required');
+  }
+
+  private hasValidApiSignature(method: string, url: string, apiKey?: string, signature?: string): boolean {
+    const secret = process.env.API_KEY_SECRET;
+    if (!secret || !apiKey || !signature) return false;
+    const expected = createHmac('sha256', secret).update(`${method}:${url}`).digest('hex');
+    const actualBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+    return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
   }
 }
 
@@ -54,10 +73,11 @@ class GatewayProxy {
 }
 
 @Controller('api/v3')
-@UseGuards(ApiKeyGuard)
+@UseGuards(GatewayAuthGuard)
 class GatewayController {
   constructor(private readonly proxy: GatewayProxy) {}
 
+  @Public()
   @Get('health')
   health() {
     return {
@@ -70,25 +90,29 @@ class GatewayController {
   @Get('account')
   account(@Headers('authorization') authorization?: string, @Query('userId') queryUserId?: string) {
     const userId = queryUserId ?? userIdFromAuthorization(authorization);
-    if (!userId) return { authenticated: false, balances: [] };
+    if (!userId) throw new UnauthorizedException('userId is required for API key account requests');
     return this.proxy.get('wallet', `/wallets/${encodeURIComponent(userId)}`);
   }
 
+  @Public()
   @Get('exchangeInfo')
   exchangeInfo() {
     return { timezone: 'UTC', symbols: ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'], rateLimits: [{ type: 'REQUEST_WEIGHT', interval: 'MINUTE', limit: 1200 }] };
   }
 
+  @Public()
   @Get('ticker/24hr')
   ticker(@Query('symbol') symbol = 'BTC-USDT') {
     return { symbol, lastPrice: '103', volume: '120000' };
   }
 
+  @Public()
   @Post('auth/register')
   register(@Body() body: { email: string; password: string }) {
     return this.proxy.post('auth', '/auth/register', body);
   }
 
+  @Public()
   @Post('auth/login')
   login(@Body() body: { email: string; password: string; totpCode?: string; deviceFingerprint?: string }) {
     return this.proxy.post('auth', '/auth/login', body);
@@ -97,7 +121,8 @@ class GatewayController {
   @Post('orders')
   placeOrder(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
     const symbol = typeof body.symbol === 'string' ? body.symbol : normalizePair(String(body.pair ?? 'BTCUSDT'));
-    const userId = typeof body.userId === 'string' ? body.userId : userIdFromAuthorization(authorization) ?? 'api-user';
+    const userId = typeof body.userId === 'string' ? body.userId : userIdFromAuthorization(authorization);
+    if (!userId) throw new UnauthorizedException('userId is required for API key order requests');
     return this.proxy.post(
       'trading',
       '/orders',
@@ -115,6 +140,7 @@ class GatewayController {
     );
   }
 
+  @Public()
   @Get('depth')
   depth(@Query('symbol') symbol = 'BTCUSDT') {
     return this.proxy.get('marketData', `/depth/${normalizePair(symbol)}`);
@@ -139,22 +165,16 @@ function normalizePair(symbol: string): string {
 }
 
 function userIdFromAuthorization(authorization?: string): string | undefined {
-  const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : undefined;
-  if (!token) return undefined;
-  try {
-    const [, payload] = token.split('.');
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return typeof decoded.sub === 'string' ? decoded.sub : undefined;
-  } catch {
-    return undefined;
-  }
+  const token = extractBearerToken(authorization);
+  return token ? verifyJwtToken(token).userId : undefined;
 }
 
-@Module({ controllers: [GatewayController], providers: [ApiKeyGuard, GatewayProxy] })
+@Module({ controllers: [GatewayController], providers: [GatewayAuthGuard, GatewayProxy] })
 class GatewayModule {}
 
 async function bootstrap() {
   const app = await NestFactory.create(GatewayModule);
+  app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
   app.enableCors();
   const config = new DocumentBuilder()
     .setTitle('NexusTrade API')

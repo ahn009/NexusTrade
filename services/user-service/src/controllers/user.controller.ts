@@ -1,6 +1,6 @@
 // services/user-service/src/controllers/user.controller.ts
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
-import { AccountTier, KycStatus } from '@nexus/shared';
+import { AccountTier, KycStatus, Public } from '@nexus/shared';
 import { AddressBookDto, KycDto, ProfileDto } from '../dto/user.dto';
 import { UserService } from '../services/user.service';
 
@@ -8,6 +8,7 @@ import { UserService } from '../services/user.service';
 export class UserController {
   constructor(private readonly users: UserService) {}
 
+  @Public()
   @Get('health')
   health() {
     return { status: 'ok', service: 'user-service' };
