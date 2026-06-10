@@ -1,0 +1,21 @@
+# infra/monitoring/alert-rules.yml
+groups:
+  - name: nexustrade-service-health
+    rules:
+      - alert: NexusTradeServiceDown
+        expr: up{job="nexustrade-services"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NexusTrade service is down"
+          description: "{{ $labels.instance }} has failed health scraping for more than 2 minutes."
+
+      - alert: NexusTradeInfrastructureTargetDown
+        expr: up{job="nexustrade-infra"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NexusTrade infrastructure target is unreachable"
+          description: "{{ $labels.instance }} has been unreachable for more than 5 minutes."

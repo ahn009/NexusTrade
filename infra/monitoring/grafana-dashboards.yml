@@ -1,0 +1,10 @@
+# infra/monitoring/grafana-dashboards.yml
+apiVersion: 1
+
+providers:
+  - name: nexustrade
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

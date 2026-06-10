@@ -22,6 +22,12 @@ jobs:
       - run: npm run build
       - name: Build node service image
         run: docker build -f infra/docker/node-service.Dockerfile -t nexustrade-node-service:${{ github.sha }} .
+      - name: Scan node service image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: nexustrade-node-service:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
 
   matching-engine:
     runs-on: ubuntu-latest
@@ -31,3 +37,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --manifest-path services/matching-engine/Cargo.toml
       - run: docker build -f infra/docker/rust-matching.Dockerfile -t nexustrade-matching:${{ github.sha }} .
+      - name: Scan matching image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: nexustrade-matching:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
