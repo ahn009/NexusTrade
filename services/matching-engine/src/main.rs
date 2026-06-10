@@ -42,6 +42,11 @@ impl MatchingEngine for MatchingService {
         } else {
             Some(parse_decimal(&input.price)?)
         };
+        let stop_price = if input.stop_price.is_empty() {
+            None
+        } else {
+            Some(parse_decimal(&input.stop_price)?)
+        };
         let quantity = parse_decimal(&input.quantity)?;
         let symbol = parse_symbol(&input.symbol)?;
         let order = Order::new(
@@ -50,7 +55,7 @@ impl MatchingEngine for MatchingService {
             side,
             kind,
             price,
-            None,
+            stop_price,
             quantity,
         );
         let report = self.engine.submit_order(symbol, order);
@@ -166,7 +171,8 @@ fn parse_kind(value: &str) -> Result<OrderKind, Status> {
         "STOP_MARKET" | "StopMarket" => Ok(OrderKind::StopMarket),
         "STOP_LIMIT" | "StopLimit" => Ok(OrderKind::StopLimit),
         "IOC" | "Ioc" => Ok(OrderKind::Ioc),
-        "FOK" | "Fok" | "FOC" => Ok(OrderKind::Fok),
+        "FOK" | "Fok" => Ok(OrderKind::Fok),
+        "FOC" => Ok(OrderKind::Ioc),
         "POST_ONLY" | "PostOnly" => Ok(OrderKind::PostOnly),
         _ => Err(Status::invalid_argument("invalid order_type")),
     }

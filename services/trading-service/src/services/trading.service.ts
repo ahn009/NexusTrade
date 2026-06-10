@@ -30,6 +30,7 @@ export interface StoredOrder {
   side: OrderSide;
   type: OrderType;
   price?: string;
+  stopPrice?: string;
   quantity: string;
   filledQuantity: string;
   status: OrderStatus;
@@ -70,6 +71,7 @@ export class TradingService implements OnModuleDestroy {
       side: dto.side,
       type: dto.type,
       price,
+      stopPrice: dto.stopPrice ? requireDecimalString(dto.stopPrice, 'stopPrice') : undefined,
       quantity,
       filledQuantity: '0',
       status: OrderStatus.New,
@@ -105,6 +107,7 @@ export class TradingService implements OnModuleDestroy {
         side: order.side,
         orderType: order.type,
         price: order.price,
+        stopPrice: order.stopPrice,
         quantity: order.quantity,
         clientOrderId: order.clientOrderId
       });

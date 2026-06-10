@@ -19,6 +19,7 @@ message SubmitOrderRequest {
   string price = 6;
   string quantity = 7;
   string client_order_id = 8;
+  string stop_price = 9;
 }
 
 message SubmitOrderResponse {

@@ -9,6 +9,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+const MAX_AUDIT_LOG_FILLS: usize = 10_000;
+const MAX_ORDER_STATUS_ENTRIES: usize = 100_000;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Side {
     Buy,
@@ -350,6 +353,11 @@ impl MatchingEngineCore {
 
 impl OrderBook {
     pub fn submit(&mut self, mut incoming: Order) -> ExecutionReport {
+        if self.status.contains_key(&incoming.order_id)
+            || self.order_index.contains_key(&incoming.order_id)
+        {
+            return Self::rejected(incoming.order_id, "duplicate order_id");
+        }
         if incoming.remaining_quantity <= Decimal::ZERO {
             return Self::rejected(incoming.order_id, "quantity must be positive");
         }
@@ -366,6 +374,7 @@ impl OrderBook {
                 incoming.order_id.clone(),
                 (OrderStatus::PendingStop, Decimal::ZERO),
             );
+            self.prune_status_log();
             self.stop_orders.push(incoming.clone());
             return ExecutionReport {
                 order_id: incoming.order_id,
@@ -479,6 +488,7 @@ impl OrderBook {
                     partial_order_id,
                     (OrderStatus::PartiallyFilled, filled_quantity),
                 );
+                self.prune_status_log();
             }
             if remove_empty_level {
                 self.remove_level(opposite_side, price);
@@ -506,6 +516,8 @@ impl OrderBook {
         };
         self.status
             .insert(order_id.clone(), (status.clone(), filled_quantity));
+        self.prune_status_log();
+        self.prune_audit_log();
         ExecutionReport {
             order_id,
             accepted: true,
@@ -539,6 +551,7 @@ impl OrderBook {
                 order.original_quantity - order.remaining_quantity,
             ),
         );
+        self.prune_status_log();
         if self.level_is_empty(side, price) {
             self.remove_level(side, price);
         }
@@ -694,6 +707,7 @@ impl OrderBook {
         self.order_index.insert(order_id.clone(), (side, price));
         self.status
             .insert(order_id, (OrderStatus::New, filled_quantity));
+        self.prune_status_log();
     }
 
     fn available_crossing_quantity(&self, incoming: &Order) -> Decimal {
@@ -768,6 +782,26 @@ impl OrderBook {
             fills: vec![],
             reject_reason: Some(reason.to_string()),
         }
+    }
+
+    fn prune_audit_log(&mut self) {
+        if self.audit_log.len() > MAX_AUDIT_LOG_FILLS {
+            let remove_count = self.audit_log.len() - MAX_AUDIT_LOG_FILLS;
+            self.audit_log.drain(0..remove_count);
+        }
+    }
+
+    fn prune_status_log(&mut self) {
+        if self.status.len() <= MAX_ORDER_STATUS_ENTRIES {
+            return;
+        }
+        self.status.retain(|order_id, (status, _)| {
+            self.order_index.contains_key(order_id)
+                || matches!(
+                    status,
+                    OrderStatus::New | OrderStatus::PartiallyFilled | OrderStatus::PendingStop
+                )
+        });
     }
 }
 
@@ -1044,6 +1078,17 @@ mod tests {
         assert_eq!(report.status, OrderStatus::Rejected);
         assert!(report.reject_reason.unwrap().contains("self-trade"));
         assert_eq!(book.depth(10).1, vec![(dec!(100), dec!(1))]);
+    }
+
+    #[test]
+    fn duplicate_order_id_is_rejected() {
+        let mut book = OrderBook::default();
+        let first = book.submit(Order::limit("b1", "u1", Side::Buy, dec!(100), dec!(1)));
+        let duplicate = book.submit(Order::limit("b1", "u2", Side::Buy, dec!(101), dec!(1)));
+        assert_eq!(first.status, OrderStatus::New);
+        assert_eq!(duplicate.status, OrderStatus::Rejected);
+        assert!(duplicate.reject_reason.unwrap().contains("duplicate"));
+        assert_eq!(book.depth(10).0, vec![(dec!(100), dec!(1))]);
     }
 
     #[test]

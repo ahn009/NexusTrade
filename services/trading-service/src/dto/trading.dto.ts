@@ -22,6 +22,10 @@ export class PlaceOrderDto {
   @IsString()
   price?: string;
 
+  @IsOptional()
+  @IsString()
+  stopPrice?: string;
+
   @IsString()
   quantity!: string;
 

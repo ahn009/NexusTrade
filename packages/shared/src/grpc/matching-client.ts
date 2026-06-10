@@ -14,6 +14,7 @@ export interface SubmitOrderRequest {
   price?: string;
   quantity: string;
   clientOrderId?: string;
+  stopPrice?: string;
 }
 
 export interface MatchFill {
@@ -117,7 +118,8 @@ export class GrpcMatchingClient implements MatchingEngineClient {
       order_type: request.orderType,
       price: request.price ?? '',
       quantity: request.quantity,
-      client_order_id: request.clientOrderId ?? ''
+      client_order_id: request.clientOrderId ?? '',
+      stop_price: request.stopPrice ?? ''
     });
 
     return {
