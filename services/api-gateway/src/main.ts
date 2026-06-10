@@ -103,7 +103,7 @@ class GatewayController {
   @Public()
   @Get('ticker/24hr')
   ticker(@Query('symbol') symbol = 'BTC-USDT') {
-    return { symbol, lastPrice: '103', volume: '120000' };
+    return this.proxy.get('marketData', `/ticker/${normalizePair(symbol)}`);
   }
 
   @Public()

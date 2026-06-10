@@ -1,9 +1,9 @@
 // services/market-data-service/src/main.ts
 import 'reflect-metadata';
-import { Controller, Get, Logger, Module, OnModuleInit, Param, Query } from '@nestjs/common';
+import { Controller, Get, Logger, Module, OnModuleDestroy, OnModuleInit, Param, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import { configureHttpSecurity, EventType, KafkaEvent, KafkaModule, KafkaService, KafkaTopics, money, Trade } from '@nexus/shared';
+import { configureHttpSecurity, EventType, GrpcMatchingClient, KafkaEvent, KafkaModule, KafkaService, KafkaTopics, money, Trade } from '@nexus/shared';
 import { Server } from 'socket.io';
 
 @WebSocketGateway({ namespace: '/market', cors: true })
@@ -16,10 +16,11 @@ class MarketDataGateway {
   }
 }
 
-class MarketDataService implements OnModuleInit {
+class MarketDataService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MarketDataService.name);
   private readonly trades = new Map<string, Trade[]>();
   private readonly tickers = new Map<string, { symbol: string; lastPrice: string; volume: string; high: string; low: string }>();
+  private readonly matching = new GrpcMatchingClient();
 
   constructor(private readonly gateway: MarketDataGateway, private readonly kafka: KafkaService) {}
 
@@ -51,12 +52,21 @@ class MarketDataService implements OnModuleInit {
     return this.tickers.get(symbol) ?? { symbol, priceChange: '0', priceChangePercent: '0', lastPrice: '0', volume: '0', high: '0', low: '0' };
   }
 
-  getDepth(symbol: string) {
-    return { symbol, bids: [['102', '4.2']], asks: [['104', '3.8']] };
+  async getDepth(symbol: string, depth: number) {
+    try {
+      return { symbol, ...(await this.matching.getOrderBook(symbol, depth)) };
+    } catch (error) {
+      this.logger.warn(`matching depth unavailable for ${symbol}: ${(error as Error).message}`);
+      return { symbol, bids: [], asks: [] };
+    }
   }
 
   getTrades(symbol: string) {
     return this.trades.get(symbol) ?? [];
+  }
+
+  onModuleDestroy() {
+    this.matching.close();
   }
 
   private recordTrade(trade: Trade) {
@@ -93,8 +103,8 @@ class MarketDataController {
   }
 
   @Get('depth/:symbol')
-  depth(@Param('symbol') symbol: string) {
-    return this.marketData.getDepth(symbol);
+  depth(@Param('symbol') symbol: string, @Query('limit') limit = '100') {
+    return this.marketData.getDepth(symbol, Math.max(1, Math.min(Number(limit) || 100, 1000)));
   }
 
   @Get('trades/:symbol')
