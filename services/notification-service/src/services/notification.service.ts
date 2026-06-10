@@ -27,10 +27,21 @@ export class NotificationService implements OnModuleInit {
 
   enqueue(dto: NotificationDto) {
     this.queue.push(dto);
+    this.deliver(dto);
     return { queued: true, position: this.queue.length, event: createEvent(EventType.NotificationRequested, dto.recipient, dto, 'notification-service') };
   }
 
   list() {
     return this.queue;
+  }
+
+  private deliver(dto: NotificationDto) {
+    const provider = {
+      email: process.env.EMAIL_PROVIDER ?? 'log',
+      sms: process.env.SMS_PROVIDER ?? 'log',
+      push: process.env.PUSH_PROVIDER ?? 'log',
+      in_app: 'queue'
+    }[dto.channel];
+    this.logger.log(`notification queued via ${provider}: ${dto.template} -> ${dto.recipient}`);
   }
 }

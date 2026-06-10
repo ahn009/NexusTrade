@@ -29,6 +29,11 @@ export class WithdrawalController {
     return this.withdrawals.approve(id, approverId);
   }
 
+  @Post('withdrawals/:id/reject')
+  reject(@Param('id') id: string, @Body('approverId') approverId: string) {
+    return this.withdrawals.reject(id, approverId);
+  }
+
   @Get('withdrawals')
   list(@Query('userId') userId?: string) {
     return this.withdrawals.list(userId);

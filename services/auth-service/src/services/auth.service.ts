@@ -8,7 +8,7 @@ import * as jwt from 'jsonwebtoken';
 import * as OTPAuth from 'otpauth';
 import { createEvent, EventType, KafkaService, KafkaTopics, UserStatus } from '@nexus/shared';
 import { Repository } from 'typeorm';
-import { LoginDto, RegisterDto, TotpVerifyDto } from '../dto/auth.dto';
+import { LogoutDto, LoginDto, RefreshTokenDto, RegisterDto, TotpVerifyDto } from '../dto/auth.dto';
 
 @Injectable()
 export class AuthService {
@@ -67,6 +67,36 @@ export class AuthService {
       refreshToken,
       sessionId
     };
+  }
+
+  async refresh(dto: RefreshTokenDto) {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new HttpException('JWT_SECRET is not configured', HttpStatus.INTERNAL_SERVER_ERROR);
+    const session = await this.sessions.findOne({ where: { id: dto.sessionId } });
+    if (!session || session.revokedAt || session.expiresAt <= new Date()) {
+      throw new HttpException('invalid refresh session', HttpStatus.UNAUTHORIZED);
+    }
+    if (!(await bcrypt.compare(dto.refreshToken, session.refreshTokenHash))) {
+      throw new HttpException('invalid refresh token', HttpStatus.UNAUTHORIZED);
+    }
+    const nextRefreshToken = randomBytes(48).toString('base64url');
+    session.refreshTokenHash = await bcrypt.hash(nextRefreshToken, 12);
+    session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    await this.sessions.save(session);
+    return {
+      accessToken: jwt.sign({ sub: session.userId, sid: session.id }, jwtSecret, { expiresIn: '15m' }),
+      refreshToken: nextRefreshToken,
+      sessionId: session.id
+    };
+  }
+
+  async logout(dto: LogoutDto) {
+    const session = await this.sessions.findOne({ where: { id: dto.sessionId } });
+    if (session && await bcrypt.compare(dto.refreshToken, session.refreshTokenHash)) {
+      session.revokedAt = new Date();
+      await this.sessions.save(session);
+    }
+    return { loggedOut: true };
   }
 
   async setupTotp(userId: string) {

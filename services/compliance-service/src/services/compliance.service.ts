@@ -6,7 +6,7 @@ import { TransactionScreenDto } from '../dto/compliance.dto';
 @Injectable()
 export class ComplianceService implements OnModuleInit {
   private readonly logger = new Logger(ComplianceService.name);
-  private watchlist = new Set(['blocked-address', 'sanctioned-entity']);
+  private watchlist = new Set((process.env.COMPLIANCE_WATCHLIST ?? 'blocked-address,sanctioned-entity').split(',').map((entry) => entry.trim()).filter(Boolean));
 
   constructor(private readonly kafka: KafkaService) {}
 

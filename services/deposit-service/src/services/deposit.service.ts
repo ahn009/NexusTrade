@@ -1,9 +1,9 @@
 // services/deposit-service/src/services/deposit.service.ts
-import { Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DepositEntity } from '@nexus/database';
 import { createHash, randomUUID } from 'crypto';
-import { createEvent, Deposit, EventType, KafkaService, KafkaTopics, TransactionStatus } from '@nexus/shared';
+import { createEvent, Deposit, EventType, KafkaService, KafkaTopics, money, TransactionStatus } from '@nexus/shared';
 import { Repository } from 'typeorm';
 import { AddressRequestDto, SimulateDepositDto } from '../dto/deposit.dto';
 
@@ -21,6 +21,10 @@ export class DepositService {
   }
 
   async simulateDeposit(dto: SimulateDepositDto) {
+    const duplicate = await this.deposits.findOne({ where: { txHash: dto.txHash } });
+    if (duplicate) throw new HttpException('deposit txHash already processed', HttpStatus.CONFLICT);
+    const minimum = money(process.env.MIN_DEPOSIT_AMOUNT ?? '0.00000001');
+    if (money(dto.amount).lt(minimum)) throw new HttpException('deposit below minimum amount', HttpStatus.BAD_REQUEST);
     const address = this.generateAddress(dto).address;
     const requiredConfirmations = dto.asset === 'BTC' ? 3 : dto.asset === 'SOL' ? 32 : 12;
     const deposit = await this.deposits.save(this.deposits.create({

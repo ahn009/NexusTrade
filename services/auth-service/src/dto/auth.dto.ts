@@ -27,3 +27,13 @@ export class TotpVerifyDto {
   @IsString()
   code!: string;
 }
+
+export class RefreshTokenDto {
+  @IsString()
+  sessionId!: string;
+
+  @IsString()
+  refreshToken!: string;
+}
+
+export class LogoutDto extends RefreshTokenDto {}
