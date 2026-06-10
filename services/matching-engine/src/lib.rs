@@ -529,7 +529,7 @@ impl OrderBook {
 
     pub fn cancel(&mut self, order_id: &str, user_id: &str) -> bool {
         let Some((side, price)) = self.order_index.get(order_id).cloned() else {
-            return false;
+            return self.cancel_stop_order(order_id, user_id);
         };
         let Some(level) = self.level_mut(side, price) else {
             return false;
@@ -555,6 +555,26 @@ impl OrderBook {
         if self.level_is_empty(side, price) {
             self.remove_level(side, price);
         }
+        true
+    }
+
+    fn cancel_stop_order(&mut self, order_id: &str, user_id: &str) -> bool {
+        let Some(pos) = self
+            .stop_orders
+            .iter()
+            .position(|order| order.order_id == order_id && order.user_id == user_id)
+        else {
+            return false;
+        };
+        let order = self.stop_orders.remove(pos);
+        self.status.insert(
+            order_id.to_string(),
+            (
+                OrderStatus::Cancelled,
+                order.original_quantity - order.remaining_quantity,
+            ),
+        );
+        self.prune_status_log();
         true
     }
 
@@ -1089,6 +1109,28 @@ mod tests {
         assert_eq!(duplicate.status, OrderStatus::Rejected);
         assert!(duplicate.reject_reason.unwrap().contains("duplicate"));
         assert_eq!(book.depth(10).0, vec![(dec!(100), dec!(1))]);
+    }
+
+    #[test]
+    fn pending_stop_order_can_be_cancelled() {
+        let mut book = OrderBook::default();
+        let report = book.submit(Order::new(
+            "stop-1",
+            "u1",
+            Side::Buy,
+            OrderKind::StopLimit,
+            Some(dec!(101)),
+            Some(dec!(100)),
+            dec!(1),
+        ));
+        assert_eq!(report.status, OrderStatus::PendingStop);
+
+        assert!(book.cancel("stop-1", "u1"));
+        assert_eq!(
+            book.order_status("stop-1").unwrap().0,
+            OrderStatus::Cancelled
+        );
+        assert!(book.trigger_stops(dec!(100)).is_empty());
     }
 
     #[test]

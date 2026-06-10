@@ -140,9 +140,17 @@ impl MatchingEngine for MatchingService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:50051".parse()?;
     let engine = MatchingEngineCore::from_env()?;
+    let service = MatchingService::new(engine);
+    let shutdown_engine = Arc::clone(&service.engine);
     Server::builder()
-        .add_service(MatchingEngineServer::new(MatchingService::new(engine)))
-        .serve(addr)
+        .add_service(MatchingEngineServer::new(service))
+        .serve_with_shutdown(addr, async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                if let Err(error) = shutdown_engine.snapshot_to_disk() {
+                    eprintln!("failed to snapshot matching engine on shutdown: {error}");
+                }
+            }
+        })
         .await?;
     Ok(())
 }
