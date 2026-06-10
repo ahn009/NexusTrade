@@ -1,16 +1,21 @@
 // services/withdrawal-service/src/services/withdrawal.service.ts
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { WithdrawalEntity } from '@nexus/database';
 import { randomUUID } from 'crypto';
 import { createEvent, EventType, KafkaService, KafkaTopics, money, TransactionStatus, Withdrawal } from '@nexus/shared';
+import { Repository } from 'typeorm';
 import { WithdrawalDto } from '../dto/withdrawal.dto';
 
 @Injectable()
 export class WithdrawalService {
-  private withdrawals: Withdrawal[] = [];
   private whitelisted = new Map<string, Set<string>>();
   private readonly authUrl = process.env.AUTH_SERVICE_URL ?? 'http://localhost:3001';
 
-  constructor(private readonly kafka: KafkaService) {}
+  constructor(
+    @InjectRepository(WithdrawalEntity) private readonly withdrawals: Repository<WithdrawalEntity>,
+    private readonly kafka: KafkaService
+  ) {}
 
   whitelist(userId: string, address: string) {
     const set = this.whitelisted.get(userId) ?? new Set<string>();
@@ -26,7 +31,7 @@ export class WithdrawalService {
     }
     const amount = money(dto.amount);
     const tier = amount.gte('1000000') ? 'COLD_CEREMONY' : amount.gte('100000') ? 'MULTI_PARTY' : amount.gte('10000') ? 'OPERATOR' : 'AUTO';
-    const withdrawal: Withdrawal = {
+    const withdrawal = await this.withdrawals.save(this.withdrawals.create({
       id: randomUUID(),
       userId: dto.userId,
       asset: dto.asset,
@@ -36,24 +41,24 @@ export class WithdrawalService {
       fee: amount.mul('0.001').toFixed(),
       approvalTier: tier,
       status: tier === 'AUTO' ? TransactionStatus.Confirmed : TransactionStatus.Pending
-    };
-    this.withdrawals.push(withdrawal);
+    }));
     const event = createEvent(EventType.WithdrawalRequested, withdrawal.id, withdrawal, 'withdrawal-service', { userId: dto.userId });
     await this.kafka.produce(KafkaTopics.Withdrawals, event, withdrawal.id).catch(() => undefined);
     return { withdrawal, event };
   }
 
   async approve(id: string, approverId: string) {
-    const withdrawal = this.withdrawals.find((candidate) => candidate.id === id);
+    const withdrawal = await this.withdrawals.findOne({ where: { id } });
     if (!withdrawal) return { found: false };
     withdrawal.status = TransactionStatus.Confirmed;
+    await this.withdrawals.save(withdrawal);
     const event = createEvent(EventType.WithdrawalApproved, id, withdrawal, 'withdrawal-service', { userId: withdrawal.userId });
     await this.kafka.produce(KafkaTopics.Withdrawals, event, id).catch(() => undefined);
     return { approverId, withdrawal, event };
   }
 
   list(userId?: string) {
-    return userId ? this.withdrawals.filter((withdrawal) => withdrawal.userId === userId) : this.withdrawals;
+    return this.withdrawals.find({ where: userId ? { userId } : {}, order: { createdAt: 'DESC' } });
   }
 
   private async verifyTotp(userId: string, code: string) {

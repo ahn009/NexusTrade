@@ -1,46 +1,58 @@
 // services/user-service/src/services/user.service.ts
 import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { KycRecordEntity, UserEntity, UserProfileEntity } from '@nexus/database';
 import { AccountTier, createEvent, EventType, KafkaService, KafkaTopics, KycLevel, KycStatus } from '@nexus/shared';
+import { Repository } from 'typeorm';
 import { AddressBookDto, KycDto, ProfileDto } from '../dto/user.dto';
 
 @Injectable()
 export class UserService {
-  private profiles = new Map<string, ProfileDto>();
-  private kyc = new Map<string, { level: KycLevel; status: KycStatus; provider: string; riskScore: number }>();
-  private tiers = new Map<string, AccountTier>();
   private referrals = new Map<string, string[]>();
   private addressBook = new Map<string, AddressBookDto[]>();
 
-  constructor(private readonly kafka: KafkaService) {}
+  constructor(
+    @InjectRepository(UserEntity) private readonly users: Repository<UserEntity>,
+    @InjectRepository(UserProfileEntity) private readonly profiles: Repository<UserProfileEntity>,
+    @InjectRepository(KycRecordEntity) private readonly kyc: Repository<KycRecordEntity>,
+    private readonly kafka: KafkaService
+  ) {}
 
-  upsertProfile(userId: string, dto: ProfileDto) {
-    this.profiles.set(userId, dto);
-    return { userId, ...dto };
+  async upsertProfile(userId: string, dto: ProfileDto) {
+    const existing = await this.profiles.findOne({ where: { userId } });
+    const profile = await this.profiles.save(this.profiles.create({ ...existing, userId, ...dto }));
+    return { userId, firstName: profile.firstName, lastName: profile.lastName, country: profile.country, phoneNumber: profile.phoneNumber };
   }
 
-  getProfile(userId: string) {
-    return { userId, profile: this.profiles.get(userId) ?? null, tier: this.tiers.get(userId) ?? AccountTier.Retail };
+  async getProfile(userId: string) {
+    const [profile, user] = await Promise.all([
+      this.profiles.findOne({ where: { userId } }),
+      this.users.findOne({ where: { id: userId } })
+    ]);
+    return { userId, profile: profile ?? null, tier: user?.accountTier ?? AccountTier.Retail };
   }
 
-  submitKyc(userId: string, dto: KycDto) {
+  async submitKyc(userId: string, dto: KycDto) {
     const riskScore = dto.level === KycLevel.Level3 ? 20 : 35;
-    this.kyc.set(userId, { level: dto.level, provider: dto.provider, riskScore, status: KycStatus.Pending });
-    return { userId, ...this.kyc.get(userId) };
+    const record = await this.kyc.save(this.kyc.create({ userId, level: dto.level, provider: dto.provider, riskScore, status: KycStatus.Pending }));
+    return { userId, level: record.level, provider: record.provider, riskScore: record.riskScore, status: record.status };
   }
 
   async reviewKyc(userId: string, status: KycStatus) {
-    const record = this.kyc.get(userId);
+    const record = await this.kyc.findOne({ where: { userId }, order: { createdAt: 'DESC' } });
     if (!record) return { userId, status: KycStatus.NotStarted };
     record.status = status;
+    await this.kyc.save(record);
+    const payload = { id: record.id, userId: record.userId, level: record.level, status: record.status, provider: record.provider, riskScore: record.riskScore };
     if (status === KycStatus.Approved) {
-      const event = createEvent(EventType.KYCVerified, userId, { userId, ...record }, 'user-service', { userId });
+      const event = createEvent(EventType.KYCVerified, userId, payload, 'user-service', { userId });
       await this.kafka.produce(KafkaTopics.Users, event, userId).catch(() => undefined);
     }
-    return { userId, ...record };
+    return payload;
   }
 
-  setTier(userId: string, tier: AccountTier) {
-    this.tiers.set(userId, tier);
+  async setTier(userId: string, tier: AccountTier) {
+    await this.users.update({ id: userId }, { accountTier: tier });
     return { userId, tier };
   }
 

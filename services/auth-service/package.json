@@ -10,6 +10,9 @@
     "test": "jest --passWithNoTests"
   },
   "dependencies": {
-    "@nexus/shared": "0.1.0"
+    "@nestjs/typeorm": "^11.0.1",
+    "@nexus/database": "^0.1.0",
+    "@nexus/shared": "0.1.0",
+    "typeorm": "^0.3.30"
   }
 }

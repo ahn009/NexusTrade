@@ -10,6 +10,7 @@ export function getDatabaseEntities(): Function[] {
     databasePackage.KycRecordEntity,
     databasePackage.LedgerTransactionEntity,
     databasePackage.OrderEntity,
+    databasePackage.SessionEntity,
     databasePackage.TradeEntity,
     databasePackage.UserEntity,
     databasePackage.UserProfileEntity,

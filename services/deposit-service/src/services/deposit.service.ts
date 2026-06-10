@@ -1,14 +1,18 @@
 // services/deposit-service/src/services/deposit.service.ts
 import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DepositEntity } from '@nexus/database';
 import { createHash, randomUUID } from 'crypto';
 import { createEvent, Deposit, EventType, KafkaService, KafkaTopics, TransactionStatus } from '@nexus/shared';
+import { Repository } from 'typeorm';
 import { AddressRequestDto, SimulateDepositDto } from '../dto/deposit.dto';
 
 @Injectable()
 export class DepositService {
-  private deposits: Deposit[] = [];
-
-  constructor(private readonly kafka: KafkaService) {}
+  constructor(
+    @InjectRepository(DepositEntity) private readonly deposits: Repository<DepositEntity>,
+    private readonly kafka: KafkaService
+  ) {}
 
   generateAddress(dto: AddressRequestDto) {
     const digest = createHash('sha256').update(`${dto.userId}:${dto.asset}:${dto.network}`).digest('hex');
@@ -19,7 +23,7 @@ export class DepositService {
   async simulateDeposit(dto: SimulateDepositDto) {
     const address = this.generateAddress(dto).address;
     const requiredConfirmations = dto.asset === 'BTC' ? 3 : dto.asset === 'SOL' ? 32 : 12;
-    const deposit: Deposit = {
+    const deposit = await this.deposits.save(this.deposits.create({
       id: randomUUID(),
       userId: dto.userId,
       asset: dto.asset,
@@ -30,24 +34,24 @@ export class DepositService {
       confirmations: 0,
       requiredConfirmations,
       status: TransactionStatus.Pending
-    };
-    this.deposits.push(deposit);
+    }));
     const event = createEvent(EventType.DepositDetected, deposit.id, deposit, 'deposit-service', { userId: dto.userId });
     await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id).catch(() => undefined);
     return { deposit, event };
   }
 
   async confirm(id: string, confirmations: number) {
-    const deposit = this.deposits.find((candidate) => candidate.id === id);
+    const deposit = await this.deposits.findOne({ where: { id } });
     if (!deposit) return { found: false };
     deposit.confirmations = confirmations;
     if (confirmations >= deposit.requiredConfirmations) deposit.status = TransactionStatus.Confirmed;
+    await this.deposits.save(deposit);
     const event = createEvent(EventType.DepositConfirmed, deposit.id, deposit, 'deposit-service', { userId: deposit.userId });
     await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id).catch(() => undefined);
     return { deposit, event };
   }
 
   list(userId?: string) {
-    return userId ? this.deposits.filter((deposit) => deposit.userId === userId) : this.deposits;
+    return this.deposits.find({ where: userId ? { userId } : {}, order: { createdAt: 'DESC' } });
   }
 }

@@ -59,6 +59,7 @@ export class UserEntity {
 }
 
 @Entity('user_profiles')
+@Index(['userId'])
 export class UserProfileEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -84,6 +85,7 @@ export class UserProfileEntity {
 }
 
 @Entity('accounts')
+@Index(['userId'])
 export class AccountEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -105,6 +107,7 @@ export class AccountEntity {
 @Entity('orders')
 @Index(['symbol', 'status', 'createdAt'])
 @Index(['userId', 'createdAt'])
+@Index(['clientOrderId'])
 export class OrderEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -277,6 +280,7 @@ export class KycRecordEntity {
 
 @Entity('deposits')
 @Index(['userId', 'createdAt'])
+@Index(['txHash'])
 export class DepositEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -366,6 +370,31 @@ export class AuditLogEntity {
 
   @Column({ name: 'actor_id', type: 'uuid', nullable: true })
   actorId?: string | null;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt!: Date;
+}
+
+@Entity('sessions')
+@Index(['userId'])
+export class SessionEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @Column({ name: 'user_id', type: 'uuid' })
+  userId!: string;
+
+  @Column({ name: 'refresh_token_hash', type: 'text' })
+  refreshTokenHash!: string;
+
+  @Column({ name: 'device_fingerprint', type: 'varchar', length: 180, nullable: true })
+  deviceFingerprint?: string | null;
+
+  @Column({ name: 'expires_at', type: 'timestamptz' })
+  expiresAt!: Date;
+
+  @Column({ name: 'revoked_at', type: 'timestamptz', nullable: true })
+  revokedAt?: Date | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;

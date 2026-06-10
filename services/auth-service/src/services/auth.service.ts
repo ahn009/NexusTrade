@@ -1,42 +1,45 @@
 // services/auth-service/src/services/auth.service.ts
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { SessionEntity, UserEntity } from '@nexus/database';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, randomUUID } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import * as OTPAuth from 'otpauth';
 import { createEvent, EventType, KafkaService, KafkaTopics, UserStatus } from '@nexus/shared';
+import { Repository } from 'typeorm';
 import { LoginDto, RegisterDto, TotpVerifyDto } from '../dto/auth.dto';
-
-interface SessionRecord {
-  userId: string;
-  refreshTokenHash: string;
-  deviceFingerprint?: string;
-  expiresAt: number;
-}
 
 @Injectable()
 export class AuthService {
-  private users = new Map<string, { id: string; email: string; passwordHash: string; status: UserStatus; totpSecret?: string }>();
-  private sessions = new Map<string, SessionRecord>();
   private loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
-  constructor(private readonly kafka: KafkaService) {}
+  constructor(
+    @InjectRepository(UserEntity) private readonly users: Repository<UserEntity>,
+    @InjectRepository(SessionEntity) private readonly sessions: Repository<SessionEntity>,
+    private readonly kafka: KafkaService
+  ) {}
 
   async register(dto: RegisterDto) {
-    const existing = [...this.users.values()].find((user) => user.email === dto.email.toLowerCase());
+    const email = dto.email.toLowerCase();
+    const existing = await this.users.findOne({ where: { email } });
     if (existing) throw new HttpException('email already registered', HttpStatus.CONFLICT);
-    const id = randomUUID();
-    const passwordHash = await bcrypt.hash(dto.password, 12);
-    const user = { id, email: dto.email.toLowerCase(), passwordHash, status: UserStatus.Active };
-    this.users.set(id, user);
-    const event = createEvent(EventType.UserRegistered, id, { userId: id, email: user.email, status: user.status }, 'auth-service', { userId: id });
-    await this.kafka.produce(KafkaTopics.Users, event, id).catch(() => undefined);
-    return { userId: id, email: user.email, status: user.status };
+
+    const user = await this.users.save(this.users.create({
+      email,
+      passwordHash: await bcrypt.hash(dto.password, 12),
+      status: UserStatus.Active,
+      referralCode: randomUUID().replace(/-/g, '').slice(0, 12)
+    }));
+
+    const event = createEvent(EventType.UserRegistered, user.id, { userId: user.id, email: user.email, status: user.status }, 'auth-service', { userId: user.id });
+    await this.kafka.produce(KafkaTopics.Users, event, user.id).catch(() => undefined);
+    return { userId: user.id, email: user.email, status: user.status };
   }
 
   async login(dto: LoginDto, ipAddress = 'unknown') {
     this.enforceRateLimit(ipAddress);
-    const user = [...this.users.values()].find((candidate) => candidate.email === dto.email.toLowerCase());
+    const user = await this.users.findOne({ where: { email: dto.email.toLowerCase() } });
     if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
       this.recordFailedLogin(ipAddress);
       throw new HttpException('invalid credentials', HttpStatus.UNAUTHORIZED);
@@ -45,16 +48,20 @@ export class AuthService {
       this.recordFailedLogin(ipAddress);
       throw new HttpException('totp verification required', HttpStatus.UNAUTHORIZED);
     }
+
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new HttpException('JWT_SECRET is not configured', HttpStatus.INTERNAL_SERVER_ERROR);
+
     const sessionId = randomUUID();
     const refreshToken = randomBytes(48).toString('base64url');
-    this.sessions.set(sessionId, {
+    await this.sessions.save(this.sessions.create({
+      id: sessionId,
       userId: user.id,
       refreshTokenHash: await bcrypt.hash(refreshToken, 12),
       deviceFingerprint: dto.deviceFingerprint,
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
-    });
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+    }));
+
     return {
       accessToken: jwt.sign({ sub: user.id, sid: sessionId }, jwtSecret, { expiresIn: '15m' }),
       refreshToken,
@@ -62,17 +69,18 @@ export class AuthService {
     };
   }
 
-  setupTotp(userId: string) {
-    const user = this.users.get(userId);
+  async setupTotp(userId: string) {
+    const user = await this.users.findOne({ where: { id: userId } });
     if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
     const secret = new OTPAuth.Secret({ size: 20 });
     user.totpSecret = secret.base32;
+    await this.users.save(user);
     const totp = new OTPAuth.TOTP({ issuer: 'NexusTrade', label: user.email, secret });
     return { secret: secret.base32, uri: totp.toString() };
   }
 
-  verifyTotpForUser(dto: TotpVerifyDto) {
-    const user = this.users.get(dto.userId);
+  async verifyTotpForUser(dto: TotpVerifyDto) {
+    const user = await this.users.findOne({ where: { id: dto.userId } });
     if (!user?.totpSecret) throw new HttpException('totp not configured', HttpStatus.BAD_REQUEST);
     return { verified: this.verifyTotp(user.totpSecret, dto.code) };
   }

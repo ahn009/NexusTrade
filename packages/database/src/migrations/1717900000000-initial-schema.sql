@@ -148,10 +148,25 @@ CREATE TABLE audit_logs (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id),
+  refresh_token_hash text NOT NULL,
+  device_fingerprint varchar(180),
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX orders_symbol_status_created_idx ON orders(symbol, status, created_at);
 CREATE INDEX orders_user_created_idx ON orders(user_id, created_at);
+CREATE INDEX orders_client_order_id_idx ON orders(client_order_id);
 CREATE INDEX trades_symbol_executed_idx ON trades(symbol, executed_at);
+CREATE INDEX user_profiles_user_id_idx ON user_profiles(user_id);
+CREATE INDEX accounts_user_id_idx ON accounts(user_id);
 CREATE INDEX ledger_user_created_idx ON ledger_transactions(user_id, created_at);
 CREATE INDEX deposits_user_created_idx ON deposits(user_id, created_at);
+CREATE INDEX deposits_tx_hash_idx ON deposits(tx_hash);
 CREATE INDEX withdrawals_user_created_idx ON withdrawals(user_id, created_at);
 CREATE INDEX audit_aggregate_created_idx ON audit_logs(aggregate_id, created_at);
+CREATE INDEX sessions_user_id_idx ON sessions(user_id);

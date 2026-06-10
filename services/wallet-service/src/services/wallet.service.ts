@@ -1,7 +1,7 @@
 // services/wallet-service/src/services/wallet.service.ts
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { LedgerTransactionEntity, WalletEntity } from '@nexus/database';
-import { add, assertNonNegative, createDatabaseConfig, money, subtract, TransactionStatus, TransactionType, WalletType } from '@nexus/shared';
+import { add, assertNonNegative, money, subtract, TransactionStatus, TransactionType, WalletType } from '@nexus/shared';
 import { DataSource, EntityManager } from 'typeorm';
 import { BalanceLeg, BalanceMutationDto, SettlementDto } from '../dto/wallet.dto';
 
@@ -10,18 +10,12 @@ export class WalletService implements OnModuleInit {
   private readonly logger = new Logger(WalletService.name);
   private balances = new Map<string, { available: string; locked: string }>();
   private ledger: unknown[] = [];
-  private dataSource?: DataSource;
+
+  constructor(private readonly dataSource: DataSource) {}
 
   async onModuleInit() {
-    if (process.env.WALLET_STORE === 'memory') return;
-    try {
-      this.dataSource = new DataSource(createDatabaseConfig());
-      await this.dataSource.initialize();
-      this.logger.log('wallet persistence enabled with TypeORM');
-    } catch (error) {
-      this.dataSource = undefined;
-      this.logger.warn(`wallet persistence unavailable, using memory store: ${(error as Error).message}`);
-    }
+    if (process.env.WALLET_STORE === 'memory') this.logger.warn('wallet memory store requested; TypeORM remains configured by DatabaseModule');
+    this.logger.log('wallet persistence enabled with shared DatabaseModule');
   }
 
   async getBalance(userId: string, asset: string) {

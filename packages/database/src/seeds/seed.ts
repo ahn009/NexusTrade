@@ -1,4 +1,9 @@
 // packages/database/src/seeds/seed.ts
+import 'reflect-metadata';
+import { AccountTier, KycLevel, UserStatus } from '@nexus/shared';
+import { DataSource } from 'typeorm';
+import { AccountEntity, UserEntity, WalletEntity } from '../entities/exchange.entities';
+
 export const currencies = ['BTC', 'ETH', 'USDT', 'USDC', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'MATIC', 'DOT', 'LINK'];
 
 export const tradingPairs = [
@@ -32,11 +37,56 @@ export const feeSchedules = [
 ];
 
 export const sampleUsers = [
-  { email: 'retail@nexustrade.local', kycLevel: 1, accountTier: 'RETAIL' },
-  { email: 'vip@nexustrade.local', kycLevel: 3, accountTier: 'VIP_2' },
-  { email: 'institution@nexustrade.local', kycLevel: 4, accountTier: 'INSTITUTIONAL' }
+  { email: 'retail@nexustrade.local', kycLevel: KycLevel.Level1, accountTier: AccountTier.Retail },
+  { email: 'vip@nexustrade.local', kycLevel: KycLevel.Level3, accountTier: AccountTier.Vip2 },
+  { email: 'institution@nexustrade.local', kycLevel: KycLevel.Institutional, accountTier: AccountTier.Institutional }
 ];
 
+async function main() {
+  const dataSource = new DataSource({
+    type: 'postgres',
+    host: process.env.DATABASE_HOST ?? 'localhost',
+    port: Number(process.env.DATABASE_PORT ?? '5432'),
+    username: process.env.DATABASE_USER ?? 'nexus',
+    password: process.env.DATABASE_PASSWORD ?? 'nexus',
+    database: process.env.DATABASE_NAME ?? 'nexus',
+    entities: [UserEntity, AccountEntity, WalletEntity]
+  });
+  await dataSource.initialize();
+  try {
+    for (const user of sampleUsers) {
+      let entity = await dataSource.getRepository(UserEntity).findOne({ where: { email: user.email } });
+      if (!entity) {
+        entity = await dataSource.getRepository(UserEntity).save(dataSource.getRepository(UserEntity).create({
+          email: user.email,
+          passwordHash: 'seeded-disabled-login',
+          status: UserStatus.Active,
+          kycLevel: user.kycLevel,
+          accountTier: user.accountTier,
+          referralCode: user.email.split('@')[0].toUpperCase()
+        }));
+      }
+      const accountRepository = dataSource.getRepository(AccountEntity);
+      const existingAccount = await accountRepository.findOne({ where: { userId: entity.id, accountType: 'SPOT' } });
+      if (!existingAccount) {
+        await accountRepository.save(accountRepository.create({ userId: entity.id, accountType: 'SPOT', tier: user.accountTier, isFrozen: false }));
+      }
+      for (const asset of ['BTC', 'ETH', 'USDT']) {
+        const walletRepository = dataSource.getRepository(WalletEntity);
+        const existingWallet = await walletRepository.findOne({ where: { userId: entity.id, asset } });
+        if (!existingWallet) {
+          await walletRepository.save(walletRepository.create({ userId: entity.id, asset, available: '0', locked: '0' }));
+        }
+      }
+    }
+  } finally {
+    await dataSource.destroy();
+  }
+}
+
 if (require.main === module) {
-  console.log(JSON.stringify({ currencies, tradingPairs, feeSchedules, sampleUsers }, null, 2));
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 }

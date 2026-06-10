@@ -1,5 +1,7 @@
 // services/trading-service/src/services/trading.service.ts
 import { HttpException, HttpStatus, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { OrderEntity, TradeEntity } from '@nexus/database';
 import { randomUUID } from 'crypto';
 import {
   createEvent,
@@ -16,6 +18,7 @@ import {
   requireSymbol,
   Trade
 } from '@nexus/shared';
+import { Repository } from 'typeorm';
 import { PlaceOrderDto } from '../dto/trading.dto';
 import { TradingGateway } from '../gateways/trading.gateway';
 
@@ -47,7 +50,12 @@ export class TradingService implements OnModuleDestroy {
   private readonly makerFeeBps = requireDecimalString(process.env.MAKER_FEE_BPS ?? '2', 'MAKER_FEE_BPS');
   private readonly takerFeeBps = requireDecimalString(process.env.TAKER_FEE_BPS ?? '4', 'TAKER_FEE_BPS');
 
-  constructor(private readonly gateway: TradingGateway, private readonly kafka: KafkaService) {}
+  constructor(
+    @InjectRepository(OrderEntity) private readonly orderRepository: Repository<OrderEntity>,
+    @InjectRepository(TradeEntity) private readonly tradeRepository: Repository<TradeEntity>,
+    private readonly gateway: TradingGateway,
+    private readonly kafka: KafkaService
+  ) {}
 
   async placeOrder(dto: PlaceOrderDto) {
     const symbol = requireSymbol(dto.symbol);
@@ -71,6 +79,19 @@ export class TradingService implements OnModuleDestroy {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
+    await this.orderRepository.save(this.orderRepository.create({
+      id: order.id,
+      userId: order.userId,
+      accountId: order.accountId,
+      symbol: order.symbol,
+      side: order.side,
+      type: order.type,
+      price: order.price,
+      quantity: order.quantity,
+      filledQuantity: order.filledQuantity,
+      status: order.status,
+      clientOrderId: order.clientOrderId
+    }));
 
     order.lockedAmount = this.estimateLockAmount(order, quoteAsset, this.takerFeeBps);
     await this.lockBalance(order, order.lockedAmount);
@@ -94,6 +115,7 @@ export class TradingService implements OnModuleDestroy {
 
     if (!matching.accepted) {
       order.status = OrderStatus.Rejected;
+      await this.orderRepository.update({ id: order.id }, { status: order.status });
       await this.unlockBalance(order, order.lockedAmount);
       return { order, matching };
     }
@@ -109,6 +131,7 @@ export class TradingService implements OnModuleDestroy {
     order.filledQuantity = fills.reduce((filled, trade) => money(filled).plus(trade.quantity).toFixed(), order.filledQuantity);
     order.status = mapOrderStatus(matching.status);
     order.updatedAt = new Date().toISOString();
+    await this.orderRepository.update({ id: order.id }, { filledQuantity: order.filledQuantity, status: order.status });
     await this.unlockUnusedIncomingLock(order, matching.fills, quoteAsset);
 
     const orderEvent = createEvent(EventType.OrderPlaced, order.id, order, 'trading-service', { userId: order.userId });
@@ -137,6 +160,7 @@ export class TradingService implements OnModuleDestroy {
       order.lockedAmount = '0';
       order.status = OrderStatus.Cancelled;
       order.updatedAt = new Date().toISOString();
+      await this.orderRepository.update({ id: order.id }, { status: order.status });
       this.orders.splice(this.orders.indexOf(order), 1);
       const event = createEvent(EventType.OrderCancelled, order.id, order, 'trading-service', { userId });
       await this.kafka.produce(KafkaTopics.Orders, event, order.id).catch(() => undefined);
@@ -146,11 +170,16 @@ export class TradingService implements OnModuleDestroy {
   }
 
   listOrders(userId?: string) {
-    return userId ? this.orders.filter((order) => order.userId === userId) : this.orders;
+    return this.orderRepository.find({ where: userId ? { userId } : {}, order: { createdAt: 'DESC' } });
   }
 
   listTrades(userId?: string) {
-    return userId ? this.trades.filter((trade) => trade.makerUserId === userId || trade.takerUserId === userId) : this.trades;
+    if (!userId) return this.tradeRepository.find({ order: { executedAt: 'DESC' } });
+    return this.tradeRepository
+      .createQueryBuilder('trade')
+      .where('trade.maker_user_id = :userId or trade.taker_user_id = :userId', { userId })
+      .orderBy('trade.executed_at', 'DESC')
+      .getMany();
   }
 
   async onModuleDestroy() {
@@ -236,6 +265,7 @@ export class TradingService implements OnModuleDestroy {
       .toFixed();
     maker.status = money(maker.filledQuantity).gte(maker.quantity) ? OrderStatus.Filled : OrderStatus.PartiallyFilled;
     maker.updatedAt = new Date().toISOString();
+    await this.orderRepository.update({ id: maker.id }, { filledQuantity: maker.filledQuantity, status: maker.status });
     if (maker.status === OrderStatus.Filled) {
       await this.unlockBalance(maker, maker.lockedAmount);
       maker.lockedAmount = '0';
@@ -264,6 +294,20 @@ export class TradingService implements OnModuleDestroy {
       feeAsset: trade.feeAsset,
       referenceId: trade.id
     });
+    await this.tradeRepository.save(this.tradeRepository.create({
+      id: trade.id,
+      symbol: trade.symbol,
+      makerOrderId: trade.makerOrderId,
+      takerOrderId: trade.takerOrderId,
+      makerUserId: trade.makerUserId,
+      takerUserId: trade.takerUserId,
+      price: trade.price,
+      quantity: trade.quantity,
+      feeAsset: trade.feeAsset,
+      makerFee: trade.makerFee,
+      takerFee: trade.takerFee,
+      executedAt: new Date(trade.executedAt)
+    }));
   }
 
   private async walletPost(path: string, body: Record<string, string>) {
