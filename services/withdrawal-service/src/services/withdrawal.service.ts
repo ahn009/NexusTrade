@@ -51,7 +51,7 @@ export class WithdrawalService {
       status: tier === 'AUTO' ? TransactionStatus.Confirmed : TransactionStatus.Pending
     }));
     const event = createEvent(EventType.WithdrawalRequested, withdrawal.id, withdrawal, 'withdrawal-service', { userId: dto.userId });
-    await this.kafka.produce(KafkaTopics.Withdrawals, event, withdrawal.id).catch(() => undefined);
+    await this.kafka.produce(KafkaTopics.Withdrawals, event, withdrawal.id);
     return { withdrawal, event };
   }
 
@@ -61,7 +61,7 @@ export class WithdrawalService {
     withdrawal.status = TransactionStatus.Confirmed;
     await this.withdrawals.save(withdrawal);
     const event = createEvent(EventType.WithdrawalApproved, id, withdrawal, 'withdrawal-service', { userId: withdrawal.userId });
-    await this.kafka.produce(KafkaTopics.Withdrawals, event, id).catch(() => undefined);
+    await this.kafka.produce(KafkaTopics.Withdrawals, event, id);
     return { approverId, withdrawal, event };
   }
 

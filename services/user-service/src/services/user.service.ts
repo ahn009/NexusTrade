@@ -66,7 +66,7 @@ export class UserService implements OnModuleInit {
     const payload = { id: record.id, userId: record.userId, level: record.level, status: record.status, provider: record.provider, riskScore: record.riskScore };
     if (status === KycStatus.Approved) {
       const event = createEvent(EventType.KYCVerified, userId, payload, 'user-service', { userId });
-      await this.kafka.produce(KafkaTopics.Users, event, userId).catch(() => undefined);
+      await this.kafka.produce(KafkaTopics.Users, event, userId);
     }
     return payload;
   }

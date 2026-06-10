@@ -6,6 +6,7 @@ export interface KafkaConsumeOptions {
   topic: string;
   groupId: string;
   fromBeginning?: boolean;
+  partitionsConsumedConcurrently?: number;
 }
 
 @Injectable()
@@ -42,13 +43,18 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     await this.withRetry(() => consumer.connect());
     await consumer.subscribe({ topic: options.topic, fromBeginning: options.fromBeginning ?? false });
     await consumer.run({
+      autoCommit: false,
+      partitionsConsumedConcurrently: options.partitionsConsumedConcurrently ?? 1,
       eachMessage: async (raw) => {
         try {
           const value = raw.message.value?.toString('utf8');
-          if (!value) return;
-          await handler(JSON.parse(value) as TPayload, raw);
+          if (value) {
+            await handler(JSON.parse(value) as TPayload, raw);
+          }
         } catch (error) {
           await this.sendToDlq(options.topic, raw, error as Error);
+        } finally {
+          await consumer.commitOffsets([{ topic: raw.topic, partition: raw.partition, offset: nextOffset(raw.message.offset) }]);
         }
       }
     });
@@ -105,4 +111,8 @@ export class KafkaModule {}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextOffset(offset: string): string {
+  return (BigInt(offset) + 1n).toString();
 }

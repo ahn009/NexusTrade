@@ -24,7 +24,7 @@ export class RiskService implements OnModuleInit {
     const liquidatable = equity.minus(maintenance).lt(0);
     const payload = { ...position, marginRatio, liquidatable, insuranceFundAsset: 'USDT' };
     const event = liquidatable ? createEvent(EventType.LiquidationTriggered, `${position.userId}:${position.symbol}`, payload, 'risk-engine', { userId: position.userId }) : null;
-    if (event) await this.kafka.produce(KafkaTopics.Risk, event, event.aggregateId).catch(() => undefined);
+    if (event) await this.kafka.produce(KafkaTopics.Risk, event, event.aggregateId);
     return { payload, event };
   }
 

@@ -40,7 +40,7 @@ export class DepositService {
       status: TransactionStatus.Pending
     }));
     const event = createEvent(EventType.DepositDetected, deposit.id, deposit, 'deposit-service', { userId: dto.userId });
-    await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id).catch(() => undefined);
+    await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id);
     return { deposit, event };
   }
 
@@ -51,7 +51,7 @@ export class DepositService {
     if (confirmations >= deposit.requiredConfirmations) deposit.status = TransactionStatus.Confirmed;
     await this.deposits.save(deposit);
     const event = createEvent(EventType.DepositConfirmed, deposit.id, deposit, 'deposit-service', { userId: deposit.userId });
-    await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id).catch(() => undefined);
+    await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id);
     return { deposit, event };
   }
 

@@ -28,7 +28,7 @@ export class ComplianceService implements OnModuleInit {
     const suspicious = highValue || sanctionsHit;
     const payload = { ...dto, highValue, sanctionsHit, suspicious, travelRuleRequired: money(dto.amountUsd).gte('1000') };
     const event = suspicious ? createEvent(EventType.SuspiciousActivityDetected, dto.userId, payload, 'compliance-service', { userId: dto.userId }) : null;
-    if (event) await this.kafka.produce(KafkaTopics.Compliance, event, dto.userId).catch(() => undefined);
+    if (event) await this.kafka.produce(KafkaTopics.Compliance, event, dto.userId);
     return { payload, event };
   }
 

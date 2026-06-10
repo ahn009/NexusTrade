@@ -33,7 +33,9 @@ export class NotificationService implements OnModuleInit {
   async enqueue(dto: NotificationDto) {
     const notification = await this.persist(dto);
     this.deliver(dto);
-    return { queued: true, notification, event: createEvent(EventType.NotificationRequested, dto.recipient, dto, 'notification-service') };
+    const event = createEvent(EventType.NotificationRequested, dto.recipient, dto, 'notification-service');
+    await this.kafka.produce(KafkaTopics.Notifications, event, dto.recipient);
+    return { queued: true, notification, event };
   }
 
   list() {

@@ -128,7 +128,7 @@ export class TradingService implements OnModuleDestroy {
       await this.settleTrade(order, trade);
       await this.applyFillToLocalOrders(order, trade);
       const tradeEvent = createEvent(EventType.TradeExecuted, trade.id, trade, 'trading-service', { userId: order.userId });
-      await this.kafka.produce(KafkaTopics.Trades, tradeEvent, trade.id).catch(() => undefined);
+      await this.kafka.produce(KafkaTopics.Trades, tradeEvent, trade.id);
     }
 
     order.filledQuantity = fills.reduce((filled, trade) => money(filled).plus(trade.quantity).toFixed(), order.filledQuantity);
@@ -138,11 +138,11 @@ export class TradingService implements OnModuleDestroy {
     await this.unlockUnusedIncomingLock(order, matching.fills, quoteAsset);
 
     const orderEvent = createEvent(EventType.OrderPlaced, order.id, order, 'trading-service', { userId: order.userId });
-    await this.kafka.produce(KafkaTopics.Orders, orderEvent, order.id).catch(() => undefined);
+    await this.kafka.produce(KafkaTopics.Orders, orderEvent, order.id);
 
     if (fills.length > 0) {
       const matchedEvent = createEvent(EventType.OrderMatched, order.id, { orderId: order.id, trades: fills }, 'trading-service', { userId: order.userId });
-      await this.kafka.produce(KafkaTopics.Orders, matchedEvent, order.id).catch(() => undefined);
+      await this.kafka.produce(KafkaTopics.Orders, matchedEvent, order.id);
     }
 
     if (this.shouldRest(order)) {
@@ -166,7 +166,7 @@ export class TradingService implements OnModuleDestroy {
       await this.orderRepository.update({ id: order.id }, { status: order.status });
       this.orders.splice(this.orders.indexOf(order), 1);
       const event = createEvent(EventType.OrderCancelled, order.id, order, 'trading-service', { userId });
-      await this.kafka.produce(KafkaTopics.Orders, event, order.id).catch(() => undefined);
+      await this.kafka.produce(KafkaTopics.Orders, event, order.id);
     }
     this.gateway.publishUserOrder(userId, { orderId, status: result.cancelled ? OrderStatus.Cancelled : OrderStatus.Rejected });
     return result;

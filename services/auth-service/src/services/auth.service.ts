@@ -33,7 +33,7 @@ export class AuthService {
     }));
 
     const event = createEvent(EventType.UserRegistered, user.id, { userId: user.id, email: user.email, status: user.status }, 'auth-service', { userId: user.id });
-    await this.kafka.produce(KafkaTopics.Users, event, user.id).catch(() => undefined);
+    await this.kafka.produce(KafkaTopics.Users, event, user.id);
     return { userId: user.id, email: user.email, status: user.status };
   }
 
