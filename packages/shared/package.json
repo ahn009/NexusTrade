@@ -10,8 +10,13 @@
     "test": "jest --passWithNoTests"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
+    "@nestjs/typeorm": "^11.0.1",
+    "@nexus/database": "^0.1.0",
     "decimal.js": "^10.5.0",
     "kafkajs": "^2.2.4",
+    "typeorm": "^0.3.30",
     "uuid": "^11.1.0"
   }
 }

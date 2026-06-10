@@ -1,0 +1,7 @@
+// services/wallet-service/src/app.module.ts
+import { Module } from '@nestjs/common';
+import { WalletController } from './controllers/wallet.controller';
+import { WalletService } from './services/wallet.service';
+
+@Module({ controllers: [WalletController], providers: [WalletService] })
+export class WalletModule {}

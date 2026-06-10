@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { Deposit, Order, Trade, Withdrawal } from '../types/domain';
 
 export const KafkaTopics = {
+  Users: 'nexus.users',
   Orders: 'nexus.orders',
   Trades: 'nexus.trades',
   Wallet: 'nexus.wallet',
@@ -17,6 +18,8 @@ export const KafkaTopics = {
 export type KafkaTopic = (typeof KafkaTopics)[keyof typeof KafkaTopics];
 
 export enum EventType {
+  UserRegistered = 'UserRegistered',
+  KYCVerified = 'KYCVerified',
   OrderPlaced = 'OrderPlaced',
   OrderCancelled = 'OrderCancelled',
   OrderMatched = 'OrderMatched',

@@ -1,15 +1,21 @@
 // services/matching-engine/src/lib.rs
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Side {
     Buy,
     Sell,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OrderKind {
     Market,
     Limit,
@@ -20,7 +26,7 @@ pub enum OrderKind {
     PostOnly,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OrderStatus {
     New,
     PartiallyFilled,
@@ -31,7 +37,7 @@ pub enum OrderStatus {
     PendingStop,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Order {
     pub order_id: String,
     pub user_id: String,
@@ -45,8 +51,22 @@ pub struct Order {
 }
 
 impl Order {
-    pub fn limit(order_id: &str, user_id: &str, side: Side, price: Decimal, quantity: Decimal) -> Self {
-        Self::new(order_id, user_id, side, OrderKind::Limit, Some(price), None, quantity)
+    pub fn limit(
+        order_id: &str,
+        user_id: &str,
+        side: Side,
+        price: Decimal,
+        quantity: Decimal,
+    ) -> Self {
+        Self::new(
+            order_id,
+            user_id,
+            side,
+            OrderKind::Limit,
+            Some(price),
+            None,
+            quantity,
+        )
     }
 
     pub fn new(
@@ -72,7 +92,7 @@ impl Order {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Fill {
     pub trade_id: String,
     pub maker_order_id: String,
@@ -110,6 +130,224 @@ pub struct OrderBook {
     next_sequence: u64,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct EngineSnapshot {
+    books: HashMap<String, OrderBookSnapshot>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OrderBookSnapshot {
+    bids: Vec<PriceLevelSnapshot>,
+    asks: Vec<PriceLevelSnapshot>,
+    stop_orders: Vec<OrderSnapshot>,
+    status: Vec<OrderStatusSnapshot>,
+    audit_log: Vec<FillSnapshot>,
+    next_sequence: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PriceLevelSnapshot {
+    price: String,
+    orders: Vec<OrderSnapshot>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OrderSnapshot {
+    order_id: String,
+    user_id: String,
+    side: Side,
+    kind: OrderKind,
+    price: Option<String>,
+    stop_price: Option<String>,
+    original_quantity: String,
+    remaining_quantity: String,
+    sequence: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OrderStatusSnapshot {
+    order_id: String,
+    status: OrderStatus,
+    filled_quantity: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FillSnapshot {
+    trade_id: String,
+    maker_order_id: String,
+    taker_order_id: String,
+    maker_user_id: String,
+    taker_user_id: String,
+    price: String,
+    quantity: String,
+}
+
+#[derive(Debug)]
+struct PersistenceConfig {
+    path: PathBuf,
+    snapshot_interval_trades: u64,
+    trades_since_snapshot: Mutex<u64>,
+}
+
+pub struct MatchingEngineCore {
+    books: Mutex<HashMap<String, Arc<Mutex<OrderBook>>>>,
+    persistence: Option<PersistenceConfig>,
+}
+
+impl Default for MatchingEngineCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MatchingEngineCore {
+    pub fn new() -> Self {
+        Self {
+            books: Mutex::new(HashMap::new()),
+            persistence: None,
+        }
+    }
+
+    pub fn with_persistence(
+        path: impl Into<PathBuf>,
+        snapshot_interval_trades: u64,
+    ) -> io::Result<Self> {
+        let path = path.into();
+        let engine = Self {
+            books: Mutex::new(load_books_from_snapshot(&path)?),
+            persistence: Some(PersistenceConfig {
+                path,
+                snapshot_interval_trades: snapshot_interval_trades.max(1),
+                trades_since_snapshot: Mutex::new(0),
+            }),
+        };
+        Ok(engine)
+    }
+
+    pub fn from_env() -> io::Result<Self> {
+        let path = std::env::var("MATCHING_ENGINE_SNAPSHOT_PATH")
+            .unwrap_or_else(|_| "matching-engine.snapshot.json".to_string());
+        Self::with_persistence(path, 1000)
+    }
+
+    pub fn submit_order(&self, symbol: &str, order: Order) -> ExecutionReport {
+        let book = self.book_for_symbol(symbol);
+        let report = book.lock().expect("order book lock").submit(order);
+        if !report.fills.is_empty() {
+            self.record_trade_count(report.fills.len() as u64);
+        }
+        report
+    }
+
+    pub fn cancel_order(&self, symbol: &str, order_id: &str, user_id: &str) -> bool {
+        let Some(book) = self.existing_book(symbol) else {
+            return false;
+        };
+        let mut book = book.lock().expect("order book lock");
+        book.cancel(order_id, user_id)
+    }
+
+    pub fn get_order_book(
+        &self,
+        symbol: &str,
+        levels: usize,
+    ) -> (Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>) {
+        let Some(book) = self.existing_book(symbol) else {
+            return (vec![], vec![]);
+        };
+        let book = book.lock().expect("order book lock");
+        book.depth(levels)
+    }
+
+    pub fn get_order_status(&self, symbol: &str, order_id: &str) -> Option<(OrderStatus, Decimal)> {
+        let book = self.existing_book(symbol)?;
+        let book = book.lock().expect("order book lock");
+        book.order_status(order_id)
+    }
+
+    pub fn snapshot_to_disk(&self) -> io::Result<()> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let snapshot = self.snapshot();
+        let payload = serde_json::to_vec_pretty(&snapshot)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if let Some(parent) = persistence.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let temp_path = persistence.path.with_extension("json.tmp");
+        fs::write(&temp_path, payload)?;
+        fs::rename(temp_path, &persistence.path)?;
+        Ok(())
+    }
+
+    pub fn symbols(&self) -> Vec<String> {
+        self.books
+            .lock()
+            .expect("books lock")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn book_for_symbol(&self, symbol: &str) -> Arc<Mutex<OrderBook>> {
+        let normalized = normalize_symbol(symbol);
+        let mut books = self.books.lock().expect("books lock");
+        books
+            .entry(normalized)
+            .or_insert_with(|| Arc::new(Mutex::new(OrderBook::default())))
+            .clone()
+    }
+
+    fn existing_book(&self, symbol: &str) -> Option<Arc<Mutex<OrderBook>>> {
+        let normalized = normalize_symbol(symbol);
+        self.books
+            .lock()
+            .expect("books lock")
+            .get(&normalized)
+            .cloned()
+    }
+
+    fn record_trade_count(&self, count: u64) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let should_snapshot = {
+            let mut trades_since_snapshot = persistence
+                .trades_since_snapshot
+                .lock()
+                .expect("snapshot counter lock");
+            *trades_since_snapshot += count;
+            if *trades_since_snapshot >= persistence.snapshot_interval_trades {
+                *trades_since_snapshot = 0;
+                true
+            } else {
+                false
+            }
+        };
+        if should_snapshot {
+            let _ = self.snapshot_to_disk();
+        }
+    }
+
+    fn snapshot(&self) -> EngineSnapshot {
+        let books = self.books.lock().expect("books lock");
+        EngineSnapshot {
+            books: books
+                .iter()
+                .map(|(symbol, book)| {
+                    (
+                        symbol.clone(),
+                        book.lock().expect("order book lock").to_snapshot(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 impl OrderBook {
     pub fn submit(&mut self, mut incoming: Order) -> ExecutionReport {
         if incoming.remaining_quantity <= Decimal::ZERO {
@@ -124,7 +362,10 @@ impl OrderBook {
             }
             self.next_sequence += 1;
             incoming.sequence = self.next_sequence;
-            self.status.insert(incoming.order_id.clone(), (OrderStatus::PendingStop, Decimal::ZERO));
+            self.status.insert(
+                incoming.order_id.clone(),
+                (OrderStatus::PendingStop, Decimal::ZERO),
+            );
             self.stop_orders.push(incoming.clone());
             return ExecutionReport {
                 order_id: incoming.order_id,
@@ -137,7 +378,9 @@ impl OrderBook {
         if incoming.kind == OrderKind::PostOnly && self.would_cross(&incoming) {
             return Self::rejected(incoming.order_id, "post-only order would take liquidity");
         }
-        if incoming.kind == OrderKind::Fok && self.available_crossing_quantity(&incoming) < incoming.remaining_quantity {
+        if incoming.kind == OrderKind::Fok
+            && self.available_crossing_quantity(&incoming) < incoming.remaining_quantity
+        {
             return ExecutionReport {
                 order_id: incoming.order_id,
                 accepted: true,
@@ -170,8 +413,15 @@ impl OrderBook {
                 .map(|resting| resting.user_id == incoming.user_id)
                 .unwrap_or(false);
             if is_self_trade {
-                let status = if fills.is_empty() { OrderStatus::Rejected } else { OrderStatus::PartiallyFilled };
-                self.status.insert(order_id.clone(), (status.clone(), original - incoming.remaining_quantity));
+                let status = if fills.is_empty() {
+                    OrderStatus::Rejected
+                } else {
+                    OrderStatus::PartiallyFilled
+                };
+                self.status.insert(
+                    order_id.clone(),
+                    (status.clone(), original - incoming.remaining_quantity),
+                );
                 return ExecutionReport {
                     order_id,
                     accepted: !fills.is_empty(),
@@ -186,8 +436,13 @@ impl OrderBook {
             let remove_empty_level;
             let fill;
             {
-                let level = self.level_mut(opposite_side, price).expect("best level exists");
-                let resting = level.orders.front_mut().expect("best level has resting order");
+                let level = self
+                    .level_mut(opposite_side, price)
+                    .expect("best level exists");
+                let resting = level
+                    .orders
+                    .front_mut()
+                    .expect("best level has resting order");
                 let quantity = incoming.remaining_quantity.min(resting.remaining_quantity);
                 incoming.remaining_quantity -= quantity;
                 resting.remaining_quantity -= quantity;
@@ -205,7 +460,10 @@ impl OrderBook {
                     let filled = level.orders.pop_front().expect("front order exists");
                     filled_resting_order = Some((filled.order_id, filled.original_quantity));
                 } else {
-                    partial_resting_order = Some((resting.order_id.clone(), resting.original_quantity - resting.remaining_quantity));
+                    partial_resting_order = Some((
+                        resting.order_id.clone(),
+                        resting.original_quantity - resting.remaining_quantity,
+                    ));
                 }
                 remove_empty_level = level.orders.is_empty();
             }
@@ -213,10 +471,14 @@ impl OrderBook {
             self.audit_log.push(fill);
             if let Some((filled_order_id, original_quantity)) = filled_resting_order {
                 self.order_index.remove(&filled_order_id);
-                self.status.insert(filled_order_id, (OrderStatus::Filled, original_quantity));
+                self.status
+                    .insert(filled_order_id, (OrderStatus::Filled, original_quantity));
             }
             if let Some((partial_order_id, filled_quantity)) = partial_resting_order {
-                self.status.insert(partial_order_id, (OrderStatus::PartiallyFilled, filled_quantity));
+                self.status.insert(
+                    partial_order_id,
+                    (OrderStatus::PartiallyFilled, filled_quantity),
+                );
             }
             if remove_empty_level {
                 self.remove_level(opposite_side, price);
@@ -227,25 +489,56 @@ impl OrderBook {
         let status = if incoming.remaining_quantity == Decimal::ZERO {
             OrderStatus::Filled
         } else if matches!(incoming.kind, OrderKind::Market | OrderKind::Ioc) {
-            if fills.is_empty() { OrderStatus::Rejected } else { OrderStatus::PartiallyFilled }
+            if fills.is_empty() {
+                OrderStatus::Rejected
+            } else {
+                OrderStatus::PartiallyFilled
+            }
         } else if incoming.kind == OrderKind::Fok {
             OrderStatus::Expired
         } else {
             self.rest(incoming);
-            if fills.is_empty() { OrderStatus::New } else { OrderStatus::PartiallyFilled }
+            if fills.is_empty() {
+                OrderStatus::New
+            } else {
+                OrderStatus::PartiallyFilled
+            }
         };
-        self.status.insert(order_id.clone(), (status.clone(), filled_quantity));
-        ExecutionReport { order_id, accepted: true, status, fills, reject_reason: None }
+        self.status
+            .insert(order_id.clone(), (status.clone(), filled_quantity));
+        ExecutionReport {
+            order_id,
+            accepted: true,
+            status,
+            fills,
+            reject_reason: None,
+        }
     }
 
     pub fn cancel(&mut self, order_id: &str, user_id: &str) -> bool {
-        let Some((side, price)) = self.order_index.get(order_id).cloned() else { return false };
-        let Some(level) = self.level_mut(side, price) else { return false };
-        let Some(pos) = level.orders.iter().position(|order| order.order_id == order_id && order.user_id == user_id) else { return false };
+        let Some((side, price)) = self.order_index.get(order_id).cloned() else {
+            return false;
+        };
+        let Some(level) = self.level_mut(side, price) else {
+            return false;
+        };
+        let Some(pos) = level
+            .orders
+            .iter()
+            .position(|order| order.order_id == order_id && order.user_id == user_id)
+        else {
+            return false;
+        };
         let order = level.orders.remove(pos).expect("position was located");
         level.total_quantity -= order.remaining_quantity;
         self.order_index.remove(order_id);
-        self.status.insert(order_id.to_string(), (OrderStatus::Cancelled, order.original_quantity - order.remaining_quantity));
+        self.status.insert(
+            order_id.to_string(),
+            (
+                OrderStatus::Cancelled,
+                order.original_quantity - order.remaining_quantity,
+            ),
+        );
         if self.level_is_empty(side, price) {
             self.remove_level(side, price);
         }
@@ -253,8 +546,19 @@ impl OrderBook {
     }
 
     pub fn depth(&self, levels: usize) -> (Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>) {
-        let bids = self.bids.iter().rev().take(levels).map(|(price, level)| (*price, level.total_quantity)).collect();
-        let asks = self.asks.iter().take(levels).map(|(price, level)| (*price, level.total_quantity)).collect();
+        let bids = self
+            .bids
+            .iter()
+            .rev()
+            .take(levels)
+            .map(|(price, level)| (*price, level.total_quantity))
+            .collect();
+        let asks = self
+            .asks
+            .iter()
+            .take(levels)
+            .map(|(price, level)| (*price, level.total_quantity))
+            .collect();
         (bids, asks)
     }
 
@@ -264,6 +568,86 @@ impl OrderBook {
 
     pub fn audit_log(&self) -> &[Fill] {
         &self.audit_log
+    }
+
+    fn to_snapshot(&self) -> OrderBookSnapshot {
+        OrderBookSnapshot {
+            bids: self.bids.values().map(price_level_to_snapshot).collect(),
+            asks: self.asks.values().map(price_level_to_snapshot).collect(),
+            stop_orders: self.stop_orders.iter().map(order_to_snapshot).collect(),
+            status: self
+                .status
+                .iter()
+                .map(
+                    |(order_id, (status, filled_quantity))| OrderStatusSnapshot {
+                        order_id: order_id.clone(),
+                        status: status.clone(),
+                        filled_quantity: filled_quantity.to_string(),
+                    },
+                )
+                .collect(),
+            audit_log: self.audit_log.iter().map(fill_to_snapshot).collect(),
+            next_sequence: self.next_sequence,
+        }
+    }
+
+    fn from_snapshot(snapshot: OrderBookSnapshot) -> io::Result<Self> {
+        let mut book = OrderBook {
+            stop_orders: snapshot
+                .stop_orders
+                .into_iter()
+                .map(order_from_snapshot)
+                .collect::<io::Result<Vec<_>>>()?,
+            status: snapshot
+                .status
+                .into_iter()
+                .map(|entry| {
+                    Ok((
+                        entry.order_id,
+                        (entry.status, parse_decimal_string(&entry.filled_quantity)?),
+                    ))
+                })
+                .collect::<io::Result<HashMap<_, _>>>()?,
+            audit_log: snapshot
+                .audit_log
+                .into_iter()
+                .map(fill_from_snapshot)
+                .collect::<io::Result<Vec<_>>>()?,
+            next_sequence: snapshot.next_sequence,
+            ..OrderBook::default()
+        };
+        for level in snapshot.bids {
+            book.restore_level(Side::Buy, level)?;
+        }
+        for level in snapshot.asks {
+            book.restore_level(Side::Sell, level)?;
+        }
+        Ok(book)
+    }
+
+    fn restore_level(&mut self, side: Side, snapshot: PriceLevelSnapshot) -> io::Result<()> {
+        let price = parse_decimal_string(&snapshot.price)?;
+        let orders = snapshot
+            .orders
+            .into_iter()
+            .map(order_from_snapshot)
+            .collect::<io::Result<VecDeque<_>>>()?;
+        let total_quantity = orders
+            .iter()
+            .fold(Decimal::ZERO, |acc, order| acc + order.remaining_quantity);
+        for order in &orders {
+            self.order_index
+                .insert(order.order_id.clone(), (side, price));
+        }
+        self.levels_mut(side).insert(
+            price,
+            PriceLevel {
+                price,
+                orders,
+                total_quantity,
+            },
+        );
+        Ok(())
     }
 
     pub fn trigger_stops(&mut self, last_price: Decimal) -> Vec<ExecutionReport> {
@@ -276,7 +660,11 @@ impl OrderBook {
                 Side::Sell => last_price <= stop_price,
             };
             if should_trigger {
-                order.kind = if order.kind == OrderKind::StopMarket { OrderKind::Market } else { OrderKind::Limit };
+                order.kind = if order.kind == OrderKind::StopMarket {
+                    OrderKind::Market
+                } else {
+                    OrderKind::Limit
+                };
                 ready.push(order);
             } else {
                 pending.push(order);
@@ -295,12 +683,17 @@ impl OrderBook {
             let level = self
                 .levels_mut(side)
                 .entry(price)
-                .or_insert_with(|| PriceLevel { price, orders: VecDeque::new(), total_quantity: Decimal::ZERO });
+                .or_insert_with(|| PriceLevel {
+                    price,
+                    orders: VecDeque::new(),
+                    total_quantity: Decimal::ZERO,
+                });
             level.total_quantity += order.remaining_quantity;
             level.orders.push_back(order);
         }
         self.order_index.insert(order_id.clone(), (side, price));
-        self.status.insert(order_id, (OrderStatus::New, filled_quantity));
+        self.status
+            .insert(order_id, (OrderStatus::New, filled_quantity));
     }
 
     fn available_crossing_quantity(&self, incoming: &Order) -> Decimal {
@@ -330,7 +723,9 @@ impl OrderBook {
             Side::Buy => self.asks.keys().next().cloned(),
             Side::Sell => self.bids.keys().next_back().cloned(),
         };
-        let Some(price) = best_price else { return false };
+        let Some(price) = best_price else {
+            return false;
+        };
         crosses(incoming, price)
     }
 
@@ -356,7 +751,9 @@ impl OrderBook {
     }
 
     fn level_is_empty(&self, side: Side, price: Decimal) -> bool {
-        self.level(side, price).map(|level| level.orders.is_empty()).unwrap_or(true)
+        self.level(side, price)
+            .map(|level| level.orders.is_empty())
+            .unwrap_or(true)
     }
 
     fn remove_level(&mut self, side: Side, price: Decimal) {
@@ -375,7 +772,14 @@ impl OrderBook {
 }
 
 fn requires_price(kind: OrderKind) -> bool {
-    matches!(kind, OrderKind::Limit | OrderKind::StopLimit | OrderKind::Ioc | OrderKind::Fok | OrderKind::PostOnly)
+    matches!(
+        kind,
+        OrderKind::Limit
+            | OrderKind::StopLimit
+            | OrderKind::Ioc
+            | OrderKind::Fok
+            | OrderKind::PostOnly
+    )
 }
 
 fn opposite(side: Side) -> Side {
@@ -396,10 +800,105 @@ fn crosses(order: &Order, resting_price: Decimal) -> bool {
     }
 }
 
+fn normalize_symbol(symbol: &str) -> String {
+    symbol.trim().to_ascii_uppercase()
+}
+
+fn load_books_from_snapshot(path: &Path) -> io::Result<HashMap<String, Arc<Mutex<OrderBook>>>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let payload = fs::read(path)?;
+    let snapshot: EngineSnapshot = serde_json::from_slice(&payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    snapshot
+        .books
+        .into_iter()
+        .map(|(symbol, book)| {
+            Ok((
+                normalize_symbol(&symbol),
+                Arc::new(Mutex::new(OrderBook::from_snapshot(book)?)),
+            ))
+        })
+        .collect()
+}
+
+fn price_level_to_snapshot(level: &PriceLevel) -> PriceLevelSnapshot {
+    PriceLevelSnapshot {
+        price: level.price.to_string(),
+        orders: level.orders.iter().map(order_to_snapshot).collect(),
+    }
+}
+
+fn order_to_snapshot(order: &Order) -> OrderSnapshot {
+    OrderSnapshot {
+        order_id: order.order_id.clone(),
+        user_id: order.user_id.clone(),
+        side: order.side,
+        kind: order.kind,
+        price: order.price.map(|price| price.to_string()),
+        stop_price: order.stop_price.map(|price| price.to_string()),
+        original_quantity: order.original_quantity.to_string(),
+        remaining_quantity: order.remaining_quantity.to_string(),
+        sequence: order.sequence,
+    }
+}
+
+fn order_from_snapshot(snapshot: OrderSnapshot) -> io::Result<Order> {
+    Ok(Order {
+        order_id: snapshot.order_id,
+        user_id: snapshot.user_id,
+        side: snapshot.side,
+        kind: snapshot.kind,
+        price: snapshot
+            .price
+            .as_deref()
+            .map(parse_decimal_string)
+            .transpose()?,
+        stop_price: snapshot
+            .stop_price
+            .as_deref()
+            .map(parse_decimal_string)
+            .transpose()?,
+        original_quantity: parse_decimal_string(&snapshot.original_quantity)?,
+        remaining_quantity: parse_decimal_string(&snapshot.remaining_quantity)?,
+        sequence: snapshot.sequence,
+    })
+}
+
+fn fill_to_snapshot(fill: &Fill) -> FillSnapshot {
+    FillSnapshot {
+        trade_id: fill.trade_id.clone(),
+        maker_order_id: fill.maker_order_id.clone(),
+        taker_order_id: fill.taker_order_id.clone(),
+        maker_user_id: fill.maker_user_id.clone(),
+        taker_user_id: fill.taker_user_id.clone(),
+        price: fill.price.to_string(),
+        quantity: fill.quantity.to_string(),
+    }
+}
+
+fn fill_from_snapshot(snapshot: FillSnapshot) -> io::Result<Fill> {
+    Ok(Fill {
+        trade_id: snapshot.trade_id,
+        maker_order_id: snapshot.maker_order_id,
+        taker_order_id: snapshot.taker_order_id,
+        maker_user_id: snapshot.maker_user_id,
+        taker_user_id: snapshot.taker_user_id,
+        price: parse_decimal_string(&snapshot.price)?,
+        quantity: parse_decimal_string(&snapshot.quantity)?,
+    })
+}
+
+fn parse_decimal_string(value: &str) -> io::Result<Decimal> {
+    Decimal::from_str(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::thread;
 
     #[test]
     fn limit_order_rests_when_not_crossing() {
@@ -451,7 +950,15 @@ mod tests {
     fn ioc_does_not_rest_remainder() {
         let mut book = OrderBook::default();
         book.submit(Order::limit("s1", "u2", Side::Sell, dec!(100), dec!(1)));
-        let report = book.submit(Order::new("b1", "u1", Side::Buy, OrderKind::Ioc, Some(dec!(100)), None, dec!(3)));
+        let report = book.submit(Order::new(
+            "b1",
+            "u1",
+            Side::Buy,
+            OrderKind::Ioc,
+            Some(dec!(100)),
+            None,
+            dec!(3),
+        ));
         println!("partial IOC report: {:?}", report);
         assert_eq!(report.status, OrderStatus::PartiallyFilled);
         assert!(book.depth(10).0.is_empty());
@@ -460,7 +967,15 @@ mod tests {
     #[test]
     fn ioc_that_cannot_fill_is_rejected_and_not_rested() {
         let mut book = OrderBook::default();
-        let report = book.submit(Order::new("b1", "u1", Side::Buy, OrderKind::Ioc, Some(dec!(100)), None, dec!(1)));
+        let report = book.submit(Order::new(
+            "b1",
+            "u1",
+            Side::Buy,
+            OrderKind::Ioc,
+            Some(dec!(100)),
+            None,
+            dec!(1),
+        ));
         println!("unfilled IOC report: {:?}", report);
         assert_eq!(report.status, OrderStatus::Rejected);
         assert_eq!(report.fills.len(), 0);
@@ -470,7 +985,15 @@ mod tests {
     #[test]
     fn market_order_without_opposing_liquidity_is_rejected() {
         let mut book = OrderBook::default();
-        let report = book.submit(Order::new("m1", "u1", Side::Buy, OrderKind::Market, None, None, dec!(1)));
+        let report = book.submit(Order::new(
+            "m1",
+            "u1",
+            Side::Buy,
+            OrderKind::Market,
+            None,
+            None,
+            dec!(1),
+        ));
         println!("empty-book market report: {:?}", report);
         assert_eq!(report.status, OrderStatus::Rejected);
         assert_eq!(report.fills.len(), 0);
@@ -481,7 +1004,15 @@ mod tests {
     fn fok_expires_without_full_available_quantity() {
         let mut book = OrderBook::default();
         book.submit(Order::limit("s1", "u2", Side::Sell, dec!(100), dec!(1)));
-        let report = book.submit(Order::new("b1", "u1", Side::Buy, OrderKind::Fok, Some(dec!(100)), None, dec!(3)));
+        let report = book.submit(Order::new(
+            "b1",
+            "u1",
+            Side::Buy,
+            OrderKind::Fok,
+            Some(dec!(100)),
+            None,
+            dec!(3),
+        ));
         println!("unfilled FOK report: {:?}", report);
         assert_eq!(report.status, OrderStatus::Expired);
         assert_eq!(book.depth(10).1, vec![(dec!(100), dec!(1))]);
@@ -491,7 +1022,15 @@ mod tests {
     fn post_only_rejects_crossing_order() {
         let mut book = OrderBook::default();
         book.submit(Order::limit("s1", "u2", Side::Sell, dec!(100), dec!(1)));
-        let report = book.submit(Order::new("b1", "u1", Side::Buy, OrderKind::PostOnly, Some(dec!(100)), None, dec!(1)));
+        let report = book.submit(Order::new(
+            "b1",
+            "u1",
+            Side::Buy,
+            OrderKind::PostOnly,
+            Some(dec!(100)),
+            None,
+            dec!(1),
+        ));
         println!("post-only report: {:?}", report);
         assert_eq!(report.status, OrderStatus::Rejected);
     }
@@ -505,5 +1044,147 @@ mod tests {
         assert_eq!(report.status, OrderStatus::Rejected);
         assert!(report.reject_reason.unwrap().contains("self-trade"));
         assert_eq!(book.depth(10).1, vec![(dec!(100), dec!(1))]);
+    }
+
+    #[test]
+    fn engine_keeps_symbols_isolated() {
+        let engine = MatchingEngineCore::new();
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("btc-bid", "u1", Side::Buy, dec!(100), dec!(2)),
+        );
+        engine.submit_order(
+            "ETH-USDT",
+            Order::limit("eth-ask", "u2", Side::Sell, dec!(50), dec!(3)),
+        );
+
+        assert_eq!(
+            engine.get_order_book("BTC-USDT", 10).0,
+            vec![(dec!(100), dec!(2))]
+        );
+        assert_eq!(engine.get_order_book("BTC-USDT", 10).1, vec![]);
+        assert_eq!(engine.get_order_book("ETH-USDT", 10).0, vec![]);
+        assert_eq!(
+            engine.get_order_book("ETH-USDT", 10).1,
+            vec![(dec!(50), dec!(3))]
+        );
+    }
+
+    #[test]
+    fn cancel_routes_to_requested_symbol_only() {
+        let engine = MatchingEngineCore::new();
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("same-id", "u1", Side::Buy, dec!(100), dec!(1)),
+        );
+        engine.submit_order(
+            "ETH-USDT",
+            Order::limit("same-id", "u1", Side::Buy, dec!(25), dec!(1)),
+        );
+
+        assert!(engine.cancel_order("BTC-USDT", "same-id", "u1"));
+        assert_eq!(
+            engine.get_order_status("BTC-USDT", "same-id").unwrap().0,
+            OrderStatus::Cancelled
+        );
+        assert_eq!(
+            engine.get_order_status("ETH-USDT", "same-id").unwrap().0,
+            OrderStatus::New
+        );
+        assert_eq!(
+            engine.get_order_book("ETH-USDT", 10).0,
+            vec![(dec!(25), dec!(1))]
+        );
+    }
+
+    #[test]
+    fn order_status_is_symbol_scoped() {
+        let engine = MatchingEngineCore::new();
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("order-1", "u1", Side::Buy, dec!(100), dec!(1)),
+        );
+
+        assert!(engine.get_order_status("ETH-USDT", "order-1").is_none());
+        assert_eq!(
+            engine.get_order_status("BTC-USDT", "order-1").unwrap().0,
+            OrderStatus::New
+        );
+    }
+
+    #[test]
+    fn snapshot_replays_resting_books_on_startup() {
+        let path = temp_snapshot_path("resting-books");
+        let engine = MatchingEngineCore::with_persistence(&path, 1000).expect("engine");
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("bid-1", "u1", Side::Buy, dec!(100), dec!(4)),
+        );
+        engine.submit_order(
+            "ETH-USDT",
+            Order::limit("ask-1", "u2", Side::Sell, dec!(80), dec!(5)),
+        );
+        engine.snapshot_to_disk().expect("snapshot");
+
+        let restored = MatchingEngineCore::with_persistence(&path, 1000).expect("restored engine");
+        assert_eq!(
+            restored.get_order_book("BTC-USDT", 10).0,
+            vec![(dec!(100), dec!(4))]
+        );
+        assert_eq!(
+            restored.get_order_book("ETH-USDT", 10).1,
+            vec![(dec!(80), dec!(5))]
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn snapshot_is_written_after_configured_trade_interval() {
+        let path = temp_snapshot_path("interval");
+        let engine = MatchingEngineCore::with_persistence(&path, 1).expect("engine");
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("ask-1", "u2", Side::Sell, dec!(100), dec!(1)),
+        );
+        assert!(!path.exists());
+
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("bid-1", "u1", Side::Buy, dec!(100), dec!(1)),
+        );
+        assert!(path.exists());
+        let restored = MatchingEngineCore::with_persistence(&path, 1).expect("restored engine");
+        assert_eq!(
+            restored.get_order_status("BTC-USDT", "bid-1").unwrap().0,
+            OrderStatus::Filled
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_access_preserves_all_symbol_books() {
+        let engine = Arc::new(MatchingEngineCore::new());
+        let handles: Vec<_> = (0..8)
+            .map(|idx| {
+                let engine = Arc::clone(&engine);
+                thread::spawn(move || {
+                    let symbol = if idx % 2 == 0 { "BTC-USDT" } else { "ETH-USDT" };
+                    engine.submit_order(
+                        symbol,
+                        Order::limit(&format!("bid-{idx}"), "u1", Side::Buy, dec!(100), dec!(1)),
+                    );
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread join");
+        }
+
+        assert_eq!(engine.get_order_book("BTC-USDT", 10).0[0].1, dec!(4));
+        assert_eq!(engine.get_order_book("ETH-USDT", 10).0[0].1, dec!(4));
+    }
+
+    fn temp_snapshot_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("nexus-matching-{label}-{}.json", Uuid::new_v4()))
     }
 }
