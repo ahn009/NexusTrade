@@ -18,3 +18,9 @@ services/matching-engine/target/
 .DS_Store
 .idea/
 .vscode/
+
+
+#Documentations 
+NexusTrade_Codex_Prompt.txt
+NexusTrade_Exchange_SRD (1).docx
+NexusTrade_Gap_Analysis.docx
