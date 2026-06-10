@@ -1,10 +1,10 @@
 // services/api-gateway/src/main.ts
 import 'reflect-metadata';
-import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, Injectable, Module, Post, Query, UnauthorizedException, UseGuards, ValidationPipe } from '@nestjs/common';
+import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, Injectable, Module, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { extractBearerToken, Public, verifyJwtToken } from '@nexus/shared';
+import { configureHttpSecurity, extractBearerToken, Public, verifyJwtToken } from '@nexus/shared';
 
 @Injectable()
 class GatewayAuthGuard implements CanActivate {
@@ -174,8 +174,7 @@ class GatewayModule {}
 
 async function bootstrap() {
   const app = await NestFactory.create(GatewayModule);
-  app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
-  app.enableCors();
+  configureHttpSecurity(app);
   const config = new DocumentBuilder()
     .setTitle('NexusTrade API')
     .setDescription('REST API for account, trading, market data, wallet, risk, and compliance workflows.')

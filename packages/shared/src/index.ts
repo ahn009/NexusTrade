@@ -8,3 +8,4 @@ export * from './modules/KafkaModule';
 export * from './utils/decimal';
 export * from './utils/validation';
 export * from './grpc/matching-client';
+export * from './http/bootstrap-security';

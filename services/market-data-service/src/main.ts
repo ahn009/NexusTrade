@@ -1,9 +1,9 @@
 // services/market-data-service/src/main.ts
 import 'reflect-metadata';
-import { Controller, Get, Logger, Module, OnModuleInit, Param, Query, ValidationPipe } from '@nestjs/common';
+import { Controller, Get, Logger, Module, OnModuleInit, Param, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import { EventType, KafkaEvent, KafkaModule, KafkaService, KafkaTopics, money, Trade } from '@nexus/shared';
+import { configureHttpSecurity, EventType, KafkaEvent, KafkaModule, KafkaService, KafkaTopics, money, Trade } from '@nexus/shared';
 import { Server } from 'socket.io';
 
 @WebSocketGateway({ namespace: '/market', cors: true })
@@ -108,8 +108,7 @@ class MarketDataModule {}
 
 async function bootstrap() {
   const app = await NestFactory.create(MarketDataModule);
-  app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
-  app.enableCors();
+  configureHttpSecurity(app);
   await app.listen(process.env.PORT ? Number(process.env.PORT) : 3005);
 }
 
