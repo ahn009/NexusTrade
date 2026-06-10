@@ -1,0 +1,36 @@
+# .github/workflows/cd.yml
+name: cd
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker build -f infra/docker/node-service.Dockerfile -t ghcr.io/ahn009/nexustrade-node-service:${{ github.sha }} .
+      - run: docker build -f infra/docker/rust-matching.Dockerfile -t ghcr.io/ahn009/nexustrade-matching-engine:${{ github.sha }} .
+      - run: docker push ghcr.io/ahn009/nexustrade-node-service:${{ github.sha }}
+      - run: docker push ghcr.io/ahn009/nexustrade-matching-engine:${{ github.sha }}
+      - name: Configure AWS credentials
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Deploy manifests
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
+        run: |
+          aws eks update-kubeconfig --name nexustrade-${{ vars.ENVIRONMENT || 'dev' }}
+          kubectl apply -f infra/k8s/nexustrade.yaml

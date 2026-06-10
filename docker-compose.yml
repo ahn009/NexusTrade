@@ -1,4 +1,29 @@
 # docker-compose.yml
+x-node-service: &node-service
+  build:
+    context: .
+    dockerfile: infra/docker/node-service.Dockerfile
+  depends_on:
+    - postgres
+    - redis
+    - kafka
+  environment:
+    DATABASE_HOST: postgres
+    DATABASE_PORT: 5432
+    DATABASE_USER: nexus
+    DATABASE_PASSWORD: nexus
+    DATABASE_NAME: nexus
+    JWT_SECRET: ${JWT_SECRET:-local-jwt-secret-change-me}
+    SERVICE_AUTH_TOKEN: ${SERVICE_AUTH_TOKEN:-local-service-token}
+    API_KEY_SECRET: ${API_KEY_SECRET:-local-api-key-secret}
+    KAFKA_BROKERS: kafka:29092
+    REDIS_URL: redis://redis:6379
+    MATCHING_ENGINE_GRPC_URL: matching-engine:50051
+    WALLET_SERVICE_URL: http://wallet-service:3004
+    AUTH_SERVICE_URL: http://auth-service:3001
+    TRADING_SERVICE_URL: http://trading-service:3003
+    MARKET_DATA_SERVICE_URL: http://market-data-service:3005
+
 services:
   postgres:
     image: postgres:16
@@ -6,6 +31,11 @@ services:
       POSTGRES_USER: nexus
       POSTGRES_PASSWORD: nexus
       POSTGRES_DB: nexus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     ports:
       - "5432:5432"
     volumes:
@@ -14,8 +44,11 @@ services:
 
   redis:
     image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
@@ -47,24 +80,99 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
 
-  api-gateway:
-    build:
-      context: .
-      dockerfile: infra/docker/node-service.Dockerfile
-    command: npm run start:dev -w @nexus/api-gateway
-    ports:
-      - "3000:3000"
-    depends_on:
-      - redis
-      - kafka
-
   matching-engine:
     build:
       context: .
       dockerfile: infra/docker/rust-matching.Dockerfile
+    environment:
+      MATCHING_ENGINE_SNAPSHOT_PATH: /data/matching-engine.snapshot.json
     ports:
       - "50051:50051"
+    volumes:
+      - matching_data:/data
+
+  api-gateway:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/api-gateway
+    ports:
+      - "3000:3000"
+
+  auth-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/auth-service
+    ports:
+      - "3001:3001"
+
+  user-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/user-service
+    ports:
+      - "3002:3002"
+
+  trading-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/trading-service
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+      - matching-engine
+      - wallet-service
+    ports:
+      - "3003:3003"
+
+  wallet-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/wallet-service
+    ports:
+      - "3004:3004"
+
+  market-data-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/market-data-service
+    ports:
+      - "3005:3005"
+
+  risk-engine:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/risk-engine
+    ports:
+      - "3006:3006"
+
+  deposit-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/deposit-service
+    ports:
+      - "3007:3007"
+
+  withdrawal-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/withdrawal-service
+    ports:
+      - "3008:3008"
+
+  compliance-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/compliance-service
+    ports:
+      - "3009:3009"
+
+  notification-service:
+    <<: *node-service
+    command: npm run start:dev -w @nexus/notification-service
+    ports:
+      - "3010:3010"
+
+  frontend:
+    <<: *node-service
+    command: npm run dev -w @nexus/frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:3000/api/v3
+    ports:
+      - "3020:3020"
 
 volumes:
   postgres_data:
+  redis_data:
   clickhouse_data:
+  matching_data:
