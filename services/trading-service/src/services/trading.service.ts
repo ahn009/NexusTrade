@@ -1,5 +1,5 @@
 // services/trading-service/src/services/trading.service.ts
-import { HttpException, HttpStatus, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { OrderEntity, TradeEntity } from '@nexus/database';
 import { randomUUID } from 'crypto';
@@ -18,7 +18,7 @@ import {
   requireSymbol,
   Trade
 } from '@nexus/shared';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { PlaceOrderDto } from '../dto/trading.dto';
 import { TradingGateway } from '../gateways/trading.gateway';
 
@@ -42,7 +42,7 @@ export interface StoredOrder {
 }
 
 @Injectable()
-export class TradingService implements OnModuleDestroy {
+export class TradingService implements OnModuleDestroy, OnModuleInit {
   private readonly logger = new Logger(TradingService.name);
   private readonly orders: StoredOrder[] = [];
   private readonly trades: Trade[] = [];
@@ -57,6 +57,42 @@ export class TradingService implements OnModuleDestroy {
     private readonly gateway: TradingGateway,
     private readonly kafka: KafkaService
   ) {}
+
+  async onModuleInit() {
+    const activeOrders = await this.orderRepository.find({
+      where: { status: In([OrderStatus.New, OrderStatus.PartiallyFilled]) },
+      order: { createdAt: 'ASC' }
+    });
+    for (const entity of activeOrders) {
+      const [baseAsset, quoteAsset] = splitSymbol(entity.symbol);
+      const filledQuantity = entity.filledQuantity ?? '0';
+      const remainingQuantity = money(entity.quantity).minus(filledQuantity).toFixed();
+      if (money(remainingQuantity).lte(0)) continue;
+      const restored: StoredOrder = {
+        id: entity.id,
+        userId: entity.userId,
+        accountId: entity.accountId,
+        symbol: entity.symbol,
+        side: entity.side,
+        type: entity.type,
+        price: entity.price ?? undefined,
+        stopPrice: entity.stopPrice ?? undefined,
+        quantity: entity.quantity,
+        filledQuantity,
+        status: entity.status,
+        clientOrderId: entity.clientOrderId ?? undefined,
+        lockedAsset: entity.side === OrderSide.Buy ? quoteAsset : baseAsset,
+        lockedAmount: '0',
+        createdAt: entity.createdAt.toISOString(),
+        updatedAt: entity.updatedAt.toISOString()
+      };
+      restored.lockedAmount = this.remainingLock(restored, quoteAsset);
+      this.orders.push(restored);
+    }
+    if (this.orders.length > 0) {
+      this.logger.log(`restored ${this.orders.length} active orders from database`);
+    }
+  }
 
   async placeOrder(dto: PlaceOrderDto) {
     const symbol = requireSymbol(dto.symbol);

@@ -21,6 +21,11 @@ data:
   WALLET_SERVICE_URL: http://wallet-service:3004
   TRADING_SERVICE_URL: http://trading-service:3003
   MARKET_DATA_SERVICE_URL: http://market-data-service:3005
+  GATEWAY_PUBLIC_RATE_LIMIT_PER_MINUTE: "1200"
+  GATEWAY_AUTH_RATE_LIMIT_PER_MINUTE: "6000"
+  GATEWAY_UPSTREAM_TIMEOUT_MS: "5000"
+  GATEWAY_CIRCUIT_FAILURES: "3"
+  GATEWAY_CIRCUIT_OPEN_MS: "30000"
 ---
 apiVersion: v1
 kind: Secret
@@ -372,3 +377,93 @@ apiVersion: v1
 kind: Service
 metadata: { name: frontend, namespace: nexustrade }
 spec: { selector: { app: frontend }, ports: [{ port: 3020, targetPort: 3020 }] }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nexustrade
+  namespace: nexustrade
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /api/v3/health
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port: { number: 80 }
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port: { number: 80 }
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port: { number: 80 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port: { number: 3020 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexustrade-default-deny
+  namespace: nexustrade
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: trading-service, namespace: nexustrade }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: trading-service } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: wallet-service, namespace: nexustrade }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: wallet-service } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: matching-engine, namespace: nexustrade }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: matching-engine } }

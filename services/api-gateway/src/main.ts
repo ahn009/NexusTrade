@@ -1,6 +1,6 @@
 // services/api-gateway/src/main.ts
 import 'reflect-metadata';
-import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, Injectable, Module, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, HttpException, HttpStatus, Injectable, Module, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -38,6 +38,31 @@ class GatewayAuthGuard implements CanActivate {
 }
 
 @Injectable()
+class GatewayRateGuard implements CanActivate {
+  private readonly buckets = new Map<string, { count: number; resetAt: number }>();
+
+  canActivate(context: ExecutionContext): boolean {
+    const req = context.switchToHttp().getRequest();
+    const userId = req.user?.userId as string | undefined;
+    const key = userId ? `user:${userId}` : `ip:${req.ip ?? req.socket?.remoteAddress ?? 'unknown'}`;
+    const limit = userId
+      ? Number(process.env.GATEWAY_AUTH_RATE_LIMIT_PER_MINUTE ?? '6000')
+      : Number(process.env.GATEWAY_PUBLIC_RATE_LIMIT_PER_MINUTE ?? '1200');
+    const now = Date.now();
+    const current = this.buckets.get(key);
+    if (!current || current.resetAt <= now) {
+      this.buckets.set(key, { count: 1, resetAt: now + 60_000 });
+      return true;
+    }
+    current.count += 1;
+    if (current.count > limit) {
+      throw new HttpException('rate limit exceeded', HttpStatus.TOO_MANY_REQUESTS);
+    }
+    return true;
+  }
+}
+
+@Injectable()
 class GatewayProxy {
   private readonly upstreams = {
     auth: process.env.AUTH_SERVICE_URL ?? 'http://localhost:3001',
@@ -45,22 +70,59 @@ class GatewayProxy {
     wallet: process.env.WALLET_SERVICE_URL ?? 'http://localhost:3004',
     marketData: process.env.MARKET_DATA_SERVICE_URL ?? 'http://localhost:3005'
   };
+  private readonly timeoutMs = Number(process.env.GATEWAY_UPSTREAM_TIMEOUT_MS ?? '5000');
+  private readonly circuitFailures = Number(process.env.GATEWAY_CIRCUIT_FAILURES ?? '3');
+  private readonly circuitOpenMs = Number(process.env.GATEWAY_CIRCUIT_OPEN_MS ?? '30000');
+  private readonly circuits = new Map<keyof GatewayProxy['upstreams'], { failures: number; openUntil: number }>();
 
-  async post<TBody>(base: keyof GatewayProxy['upstreams'], path: string, body: TBody, authorization?: string) {
-    const response = await fetch(`${this.upstreams[base]}${path}`, {
+  async post<TBody>(base: keyof GatewayProxy['upstreams'], path: string, body: TBody, authorization?: string, requestId?: string) {
+    const response = await this.fetchWithCircuit(base, path, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        ...(authorization ? { authorization } : {})
+        ...this.forwardHeaders(authorization, requestId)
       },
       body: JSON.stringify(body)
     });
     return this.readResponse(response);
   }
 
-  async get(base: keyof GatewayProxy['upstreams'], path: string) {
-    const response = await fetch(`${this.upstreams[base]}${path}`);
+  async get(base: keyof GatewayProxy['upstreams'], path: string, authorization?: string, requestId?: string) {
+    const response = await this.fetchWithCircuit(base, path, {
+      headers: this.forwardHeaders(authorization, requestId)
+    });
     return this.readResponse(response);
+  }
+
+  private async fetchWithCircuit(base: keyof GatewayProxy['upstreams'], path: string, init: RequestInit) {
+    const state = this.circuits.get(base);
+    if (state && state.openUntil > Date.now()) {
+      throw new HttpException(`${String(base)} upstream circuit is open`, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(`${this.upstreams[base]}${path}`, { ...init, signal: controller.signal });
+      this.circuits.set(base, { failures: 0, openUntil: 0 });
+      return response;
+    } catch (error) {
+      const failures = (state?.failures ?? 0) + 1;
+      this.circuits.set(base, {
+        failures,
+        openUntil: failures >= this.circuitFailures ? Date.now() + this.circuitOpenMs : 0
+      });
+      throw new HttpException(`upstream ${String(base)} unavailable: ${(error as Error).message}`, HttpStatus.SERVICE_UNAVAILABLE);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private forwardHeaders(authorization?: string, requestId?: string): Record<string, string> {
+    return {
+      ...(authorization ? { authorization } : {}),
+      ...(requestId ? { 'x-request-id': requestId } : {}),
+      ...(process.env.SERVICE_AUTH_TOKEN ? { 'x-service-token': process.env.SERVICE_AUTH_TOKEN } : {})
+    };
   }
 
   private async readResponse(response: Response) {
@@ -73,7 +135,7 @@ class GatewayProxy {
 }
 
 @Controller('api/v3')
-@UseGuards(GatewayAuthGuard)
+@UseGuards(GatewayAuthGuard, GatewayRateGuard)
 class GatewayController {
   constructor(private readonly proxy: GatewayProxy) {}
 
@@ -88,10 +150,10 @@ class GatewayController {
   }
 
   @Get('account')
-  account(@Headers('authorization') authorization?: string, @Query('userId') queryUserId?: string) {
+  account(@Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string, @Query('userId') queryUserId?: string) {
     const userId = queryUserId ?? userIdFromAuthorization(authorization);
     if (!userId) throw new UnauthorizedException('userId is required for API key account requests');
-    return this.proxy.get('wallet', `/wallets/${encodeURIComponent(userId)}`);
+    return this.proxy.get('wallet', `/wallets/${encodeURIComponent(userId)}`, authorization, requestId);
   }
 
   @Public()
@@ -102,24 +164,24 @@ class GatewayController {
 
   @Public()
   @Get('ticker/24hr')
-  ticker(@Query('symbol') symbol = 'BTC-USDT') {
-    return this.proxy.get('marketData', `/ticker/${normalizePair(symbol)}`);
+  ticker(@Query('symbol') symbol = 'BTC-USDT', @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('marketData', `/ticker/${normalizePair(symbol)}`, undefined, requestId);
   }
 
   @Public()
   @Post('auth/register')
-  register(@Body() body: { email: string; password: string }) {
-    return this.proxy.post('auth', '/auth/register', body);
+  register(@Body() body: { email: string; password: string }, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('auth', '/auth/register', body, undefined, requestId);
   }
 
   @Public()
   @Post('auth/login')
-  login(@Body() body: { email: string; password: string; totpCode?: string; deviceFingerprint?: string }) {
-    return this.proxy.post('auth', '/auth/login', body);
+  login(@Body() body: { email: string; password: string; totpCode?: string; deviceFingerprint?: string }, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('auth', '/auth/login', body, undefined, requestId);
   }
 
   @Post('orders')
-  placeOrder(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+  placeOrder(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
     const symbol = typeof body.symbol === 'string' ? body.symbol : normalizePair(String(body.pair ?? 'BTCUSDT'));
     const userId = typeof body.userId === 'string' ? body.userId : userIdFromAuthorization(authorization);
     if (!userId) throw new UnauthorizedException('userId is required for API key order requests');
@@ -136,24 +198,25 @@ class GatewayController {
         quantity: body.quantity,
         clientOrderId: body.clientOrderId
       },
-      authorization
+      authorization,
+      requestId
     );
   }
 
   @Public()
   @Get('depth')
-  depth(@Query('symbol') symbol = 'BTCUSDT') {
-    return this.proxy.get('marketData', `/depth/${normalizePair(symbol)}`);
+  depth(@Query('symbol') symbol = 'BTCUSDT', @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('marketData', `/depth/${normalizePair(symbol)}`, undefined, requestId);
   }
 
   @Post('wallets/credit')
-  credit(@Body() body: { userId: string; asset: string; amount: string; referenceId?: string }) {
+  credit(@Body() body: { userId: string; asset: string; amount: string; referenceId?: string }, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
     return this.proxy.post('wallet', '/wallets/credit', {
       userId: body.userId,
       asset: body.asset,
       amount: body.amount,
       referenceId: body.referenceId ?? `manual-${Date.now()}`
-    });
+    }, authorization, requestId);
   }
 }
 
@@ -169,7 +232,7 @@ function userIdFromAuthorization(authorization?: string): string | undefined {
   return token ? verifyJwtToken(token).userId : undefined;
 }
 
-@Module({ controllers: [GatewayController], providers: [GatewayAuthGuard, GatewayProxy] })
+@Module({ controllers: [GatewayController], providers: [GatewayAuthGuard, GatewayRateGuard, GatewayProxy] })
 class GatewayModule {}
 
 async function bootstrap() {

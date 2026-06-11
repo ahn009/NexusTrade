@@ -2,8 +2,8 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -188,6 +188,7 @@ struct FillSnapshot {
 #[derive(Debug)]
 struct PersistenceConfig {
     path: PathBuf,
+    wal_path: PathBuf,
     snapshot_interval_trades: u64,
     trades_since_snapshot: Mutex<u64>,
 }
@@ -195,6 +196,17 @@ struct PersistenceConfig {
 pub struct MatchingEngineCore {
     books: Mutex<HashMap<String, Arc<Mutex<OrderBook>>>>,
     persistence: Option<PersistenceConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+enum WalRecord {
+    Submit { symbol: String, order: OrderSnapshot },
+    Cancel {
+        symbol: String,
+        order_id: String,
+        user_id: String,
+    },
 }
 
 impl Default for MatchingEngineCore {
@@ -216,10 +228,12 @@ impl MatchingEngineCore {
         snapshot_interval_trades: u64,
     ) -> io::Result<Self> {
         let path = path.into();
+        let wal_path = wal_path_for(&path);
         let engine = Self {
-            books: Mutex::new(load_books_from_snapshot(&path)?),
+            books: Mutex::new(load_books_from_persistence(&path, &wal_path)?),
             persistence: Some(PersistenceConfig {
                 path,
+                wal_path,
                 snapshot_interval_trades: snapshot_interval_trades.max(1),
                 trades_since_snapshot: Mutex::new(0),
             }),
@@ -234,15 +248,47 @@ impl MatchingEngineCore {
     }
 
     pub fn submit_order(&self, symbol: &str, order: Order) -> ExecutionReport {
+        if let Err(error) = self.append_wal(WalRecord::Submit {
+            symbol: normalize_symbol(symbol),
+            order: order_to_snapshot(&order),
+        }) {
+            return ExecutionReport {
+                order_id: order.order_id,
+                accepted: false,
+                status: OrderStatus::Rejected,
+                fills: vec![],
+                reject_reason: Some(format!("persistence wal append failed: {error}")),
+            };
+        }
         let book = self.book_for_symbol(symbol);
-        let report = book.lock().expect("order book lock").submit(order);
-        if !report.fills.is_empty() {
-            self.record_trade_count(report.fills.len() as u64);
+        let mut book = book.lock().expect("order book lock");
+        let report = book.submit(order);
+        let mut trade_count = report.fills.len() as u64;
+        let mut trigger_prices: Vec<Decimal> = report.fills.iter().map(|fill| fill.price).collect();
+        while let Some(last_price) = trigger_prices.pop() {
+            for triggered in book.trigger_stops(last_price) {
+                trade_count += triggered.fills.len() as u64;
+                trigger_prices.extend(triggered.fills.iter().map(|fill| fill.price));
+            }
+        }
+        drop(book);
+        if trade_count > 0 {
+            self.record_trade_count(trade_count);
         }
         report
     }
 
     pub fn cancel_order(&self, symbol: &str, order_id: &str, user_id: &str) -> bool {
+        if self
+            .append_wal(WalRecord::Cancel {
+                symbol: normalize_symbol(symbol),
+                order_id: order_id.to_string(),
+                user_id: user_id.to_string(),
+            })
+            .is_err()
+        {
+            return false;
+        }
         let Some(book) = self.existing_book(symbol) else {
             return false;
         };
@@ -283,6 +329,7 @@ impl MatchingEngineCore {
         let temp_path = persistence.path.with_extension("json.tmp");
         fs::write(&temp_path, payload)?;
         fs::rename(temp_path, &persistence.path)?;
+        fs::write(&persistence.wal_path, b"")?;
         Ok(())
     }
 
@@ -333,6 +380,27 @@ impl MatchingEngineCore {
         if should_snapshot {
             let _ = self.snapshot_to_disk();
         }
+    }
+
+    fn append_wal(&self, record: WalRecord) -> io::Result<()> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        if let Some(parent) = persistence.wal_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let payload = serde_json::to_vec(&record)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&persistence.wal_path)?;
+        file.write_all(&payload)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        Ok(())
     }
 
     fn snapshot(&self) -> EngineSnapshot {
@@ -693,6 +761,7 @@ impl OrderBook {
                 Side::Sell => last_price <= stop_price,
             };
             if should_trigger {
+                self.status.remove(&order.order_id);
                 order.kind = if order.kind == OrderKind::StopMarket {
                     OrderKind::Market
                 } else {
@@ -858,6 +927,15 @@ fn normalize_symbol(symbol: &str) -> String {
     symbol.trim().to_ascii_uppercase()
 }
 
+fn load_books_from_persistence(
+    path: &Path,
+    wal_path: &Path,
+) -> io::Result<HashMap<String, Arc<Mutex<OrderBook>>>> {
+    let mut books = load_books_from_snapshot(path)?;
+    replay_wal(wal_path, &mut books)?;
+    Ok(books)
+}
+
 fn load_books_from_snapshot(path: &Path) -> io::Result<HashMap<String, Arc<Mutex<OrderBook>>>> {
     if !path.exists() {
         return Ok(HashMap::new());
@@ -875,6 +953,51 @@ fn load_books_from_snapshot(path: &Path) -> io::Result<HashMap<String, Arc<Mutex
             ))
         })
         .collect()
+}
+
+fn replay_wal(
+    wal_path: &Path,
+    books: &mut HashMap<String, Arc<Mutex<OrderBook>>>,
+) -> io::Result<()> {
+    if !wal_path.exists() {
+        return Ok(());
+    }
+    let file = fs::File::open(wal_path)?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<WalRecord>(&line) else {
+            continue;
+        };
+        match record {
+            WalRecord::Submit { symbol, order } => {
+                let book = books
+                    .entry(normalize_symbol(&symbol))
+                    .or_insert_with(|| Arc::new(Mutex::new(OrderBook::default())))
+                    .clone();
+                let order = order_from_snapshot(order)?;
+                book.lock().expect("order book lock").submit(order);
+            }
+            WalRecord::Cancel {
+                symbol,
+                order_id,
+                user_id,
+            } => {
+                if let Some(book) = books.get(&normalize_symbol(&symbol)) {
+                    book.lock()
+                        .expect("order book lock")
+                        .cancel(&order_id, &user_id);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn wal_path_for(snapshot_path: &Path) -> PathBuf {
+    snapshot_path.with_extension("wal.jsonl")
 }
 
 fn price_level_to_snapshot(level: &PriceLevel) -> PriceLevelSnapshot {
@@ -1245,7 +1368,67 @@ mod tests {
             restored.get_order_status("BTC-USDT", "bid-1").unwrap().0,
             OrderStatus::Filled
         );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(wal_path_for(&path));
+    }
+
+    #[test]
+    fn wal_replays_orders_and_cancels_since_snapshot() {
+        let path = temp_snapshot_path("wal");
+        let wal_path = wal_path_for(&path);
+        let engine = MatchingEngineCore::with_persistence(&path, 1000).expect("engine");
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("bid-1", "u1", Side::Buy, dec!(100), dec!(2)),
+        );
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("bid-2", "u1", Side::Buy, dec!(99), dec!(3)),
+        );
+        assert!(engine.cancel_order("BTC-USDT", "bid-2", "u1"));
+
+        let restored = MatchingEngineCore::with_persistence(&path, 1000).expect("restored engine");
+        assert_eq!(
+            restored.get_order_book("BTC-USDT", 10).0,
+            vec![(dec!(100), dec!(2))]
+        );
+        assert_eq!(
+            restored.get_order_status("BTC-USDT", "bid-2").unwrap().0,
+            OrderStatus::Cancelled
+        );
         let _ = fs::remove_file(path);
+        let _ = fs::remove_file(wal_path);
+    }
+
+    #[test]
+    fn stop_orders_trigger_automatically_after_trade() {
+        let engine = MatchingEngineCore::new();
+        engine.submit_order(
+            "BTC-USDT",
+            Order::new(
+                "stop-buy",
+                "u1",
+                Side::Buy,
+                OrderKind::StopLimit,
+                Some(dec!(101)),
+                Some(dec!(100)),
+                dec!(1),
+            ),
+        );
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("ask-1", "u2", Side::Sell, dec!(100), dec!(2)),
+        );
+        engine.submit_order(
+            "BTC-USDT",
+            Order::limit("bid-1", "u3", Side::Buy, dec!(100), dec!(1)),
+        );
+
+        assert_eq!(
+            engine.get_order_status("BTC-USDT", "stop-buy").unwrap().0,
+            OrderStatus::Filled
+        );
+        assert_eq!(engine.get_order_book("BTC-USDT", 10), (vec![], vec![]));
     }
 
     #[test]
