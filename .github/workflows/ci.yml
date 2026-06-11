@@ -23,7 +23,7 @@ jobs:
       - name: Build node service image
         run: docker build -f infra/docker/node-service.Dockerfile -t nexustrade-node-service:${{ github.sha }} .
       - name: Scan node service image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: nexustrade-node-service:${{ github.sha }}
           severity: CRITICAL,HIGH
@@ -38,7 +38,7 @@ jobs:
       - run: cargo test --manifest-path services/matching-engine/Cargo.toml
       - run: docker build -f infra/docker/rust-matching.Dockerfile -t nexustrade-matching:${{ github.sha }} .
       - name: Scan matching image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: nexustrade-matching:${{ github.sha }}
           severity: CRITICAL,HIGH
