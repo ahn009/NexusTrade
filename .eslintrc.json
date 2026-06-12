@@ -10,6 +10,14 @@
     "browser": true,
     "jest": true
   },
-  "extends": [],
+  "extends": ["next/core-web-vitals"],
+  "settings": {
+    "next": {
+      "rootDir": "apps/frontend/"
+    }
+  },
+  "rules": {
+    "@next/next/no-html-link-for-pages": "off"
+  },
   "ignorePatterns": ["dist", "node_modules", ".next", "services/matching-engine/target"]
 }
