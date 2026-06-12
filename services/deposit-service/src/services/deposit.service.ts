@@ -50,7 +50,8 @@ export class DepositService {
     deposit.confirmations = confirmations;
     if (confirmations >= deposit.requiredConfirmations) deposit.status = TransactionStatus.Confirmed;
     await this.deposits.save(deposit);
-    const event = createEvent(EventType.DepositConfirmed, deposit.id, deposit, 'deposit-service', { userId: deposit.userId });
+    const eventType = deposit.status === TransactionStatus.Confirmed ? EventType.DepositConfirmed : EventType.DepositDetected;
+    const event = createEvent(eventType, deposit.id, deposit, 'deposit-service', { userId: deposit.userId });
     await this.kafka.produce(KafkaTopics.Deposits, event, deposit.id);
     return { deposit, event };
   }
