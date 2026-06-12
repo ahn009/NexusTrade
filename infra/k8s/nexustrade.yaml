@@ -18,9 +18,15 @@ data:
   REDIS_URL: redis://nexustrade-redis:6379
   MATCHING_ENGINE_GRPC_URL: matching-engine:50051
   AUTH_SERVICE_URL: http://auth-service:3001
-  WALLET_SERVICE_URL: http://wallet-service:3004
+  USER_SERVICE_URL: http://user-service:3002
   TRADING_SERVICE_URL: http://trading-service:3003
+  WALLET_SERVICE_URL: http://wallet-service:3004
   MARKET_DATA_SERVICE_URL: http://market-data-service:3005
+  RISK_SERVICE_URL: http://risk-engine:3006
+  DEPOSIT_SERVICE_URL: http://deposit-service:3007
+  WITHDRAWAL_SERVICE_URL: http://withdrawal-service:3008
+  COMPLIANCE_SERVICE_URL: http://compliance-service:3009
+  NOTIFICATION_SERVICE_URL: http://notification-service:3010
   GATEWAY_PUBLIC_RATE_LIMIT_PER_MINUTE: "1200"
   GATEWAY_AUTH_RATE_LIMIT_PER_MINUTE: "6000"
   GATEWAY_UPSTREAM_TIMEOUT_MS: "5000"

@@ -52,6 +52,11 @@ export class WithdrawalService {
     }));
     const event = createEvent(EventType.WithdrawalRequested, withdrawal.id, withdrawal, 'withdrawal-service', { userId: dto.userId });
     await this.kafka.produce(KafkaTopics.Withdrawals, event, withdrawal.id);
+    if (withdrawal.status === TransactionStatus.Confirmed) {
+      const approvalEvent = createEvent(EventType.WithdrawalApproved, withdrawal.id, withdrawal, 'withdrawal-service', { userId: dto.userId });
+      await this.kafka.produce(KafkaTopics.Withdrawals, approvalEvent, withdrawal.id);
+      return { withdrawal, event, approvalEvent };
+    }
     return { withdrawal, event };
   }
 

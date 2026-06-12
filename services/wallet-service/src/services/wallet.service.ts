@@ -143,7 +143,8 @@ export class WalletService implements OnModuleInit {
     assertNonNegative(nextAvailable, 'available');
     current.available = nextAvailable;
     this.balances.set(key, current);
-    return { debit: this.record(from, TransactionType.InternalTransfer, current.available), credit: this.credit({ ...from, userId: toUserId }, TransactionType.InternalTransfer) };
+    const credit = await this.credit({ ...from, userId: toUserId }, TransactionType.InternalTransfer);
+    return { debit: this.record(from, TransactionType.InternalTransfer, current.available), credit };
   }
 
   async settleTrade(dto: SettlementDto) {

@@ -1,6 +1,6 @@
 // services/api-gateway/src/main.ts
 import 'reflect-metadata';
-import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, HttpException, HttpStatus, Injectable, Module, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, HttpException, HttpStatus, Injectable, Module, Param, Patch, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -66,9 +66,15 @@ class GatewayRateGuard implements CanActivate {
 class GatewayProxy {
   private readonly upstreams = {
     auth: process.env.AUTH_SERVICE_URL ?? 'http://localhost:3001',
+    user: process.env.USER_SERVICE_URL ?? 'http://localhost:3002',
     trading: process.env.TRADING_SERVICE_URL ?? 'http://localhost:3003',
     wallet: process.env.WALLET_SERVICE_URL ?? 'http://localhost:3004',
-    marketData: process.env.MARKET_DATA_SERVICE_URL ?? 'http://localhost:3005'
+    marketData: process.env.MARKET_DATA_SERVICE_URL ?? 'http://localhost:3005',
+    risk: process.env.RISK_SERVICE_URL ?? 'http://localhost:3006',
+    deposit: process.env.DEPOSIT_SERVICE_URL ?? 'http://localhost:3007',
+    withdrawal: process.env.WITHDRAWAL_SERVICE_URL ?? 'http://localhost:3008',
+    compliance: process.env.COMPLIANCE_SERVICE_URL ?? 'http://localhost:3009',
+    notification: process.env.NOTIFICATION_SERVICE_URL ?? 'http://localhost:3010'
   };
   private readonly timeoutMs = Number(process.env.GATEWAY_UPSTREAM_TIMEOUT_MS ?? '5000');
   private readonly circuitFailures = Number(process.env.GATEWAY_CIRCUIT_FAILURES ?? '3');
@@ -78,6 +84,18 @@ class GatewayProxy {
   async post<TBody>(base: keyof GatewayProxy['upstreams'], path: string, body: TBody, authorization?: string, requestId?: string) {
     const response = await this.fetchWithCircuit(base, path, {
       method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...this.forwardHeaders(authorization, requestId)
+      },
+      body: JSON.stringify(body)
+    });
+    return this.readResponse(response);
+  }
+
+  async patch<TBody>(base: keyof GatewayProxy['upstreams'], path: string, body: TBody, authorization?: string, requestId?: string) {
+    const response = await this.fetchWithCircuit(base, path, {
+      method: 'PATCH',
       headers: {
         'content-type': 'application/json',
         ...this.forwardHeaders(authorization, requestId)
@@ -217,6 +235,116 @@ class GatewayController {
       amount: body.amount,
       referenceId: body.referenceId ?? `manual-${Date.now()}`
     }, authorization, requestId);
+  }
+
+  @Get('users/:userId/profile')
+  getUserProfile(@Param('userId') userId: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('user', `/users/${encodeURIComponent(userId)}/profile`, authorization, requestId);
+  }
+
+  @Post('users/:userId/profile')
+  upsertUserProfile(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/profile`, body, authorization, requestId);
+  }
+
+  @Post('users/:userId/kyc')
+  submitKyc(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/kyc`, body, authorization, requestId);
+  }
+
+  @Patch('users/:userId/kyc/:status')
+  reviewKyc(@Param('userId') userId: string, @Param('status') status: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.patch('user', `/users/${encodeURIComponent(userId)}/kyc/${encodeURIComponent(status)}`, {}, authorization, requestId);
+  }
+
+  @Patch('users/:userId/tier/:tier')
+  setTier(@Param('userId') userId: string, @Param('tier') tier: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.patch('user', `/users/${encodeURIComponent(userId)}/tier/${encodeURIComponent(tier)}`, {}, authorization, requestId);
+  }
+
+  @Post('users/:userId/referrals/:referredUserId')
+  addReferral(@Param('userId') userId: string, @Param('referredUserId') referredUserId: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/referrals/${encodeURIComponent(referredUserId)}`, {}, authorization, requestId);
+  }
+
+  @Post('users/:userId/address-book')
+  addAddressBookEntry(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/address-book`, body, authorization, requestId);
+  }
+
+  @Post('deposits/address')
+  depositAddress(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('deposit', '/deposits/address', body, authorization, requestId);
+  }
+
+  @Post('deposits/simulate')
+  simulateDeposit(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('deposit', '/deposits/simulate', body, authorization, requestId);
+  }
+
+  @Post('deposits/:id/confirm/:confirmations')
+  confirmDeposit(@Param('id') id: string, @Param('confirmations') confirmations: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('deposit', `/deposits/${encodeURIComponent(id)}/confirm/${encodeURIComponent(confirmations)}`, {}, authorization, requestId);
+  }
+
+  @Get('deposits')
+  listDeposits(@Query('userId') userId?: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('deposit', `/deposits${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`, authorization, requestId);
+  }
+
+  @Post('withdrawals/whitelist/:userId')
+  whitelistWithdrawalAddress(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('withdrawal', `/withdrawals/whitelist/${encodeURIComponent(userId)}`, body, authorization, requestId);
+  }
+
+  @Post('withdrawals')
+  requestWithdrawal(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('withdrawal', '/withdrawals', body, authorization, requestId);
+  }
+
+  @Post('withdrawals/:id/approve')
+  approveWithdrawal(@Param('id') id: string, @Body() body: { approverId?: string }, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('withdrawal', `/withdrawals/${encodeURIComponent(id)}/approve`, body, authorization, requestId);
+  }
+
+  @Post('withdrawals/:id/reject')
+  rejectWithdrawal(@Param('id') id: string, @Body() body: { approverId?: string }, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('withdrawal', `/withdrawals/${encodeURIComponent(id)}/reject`, body, authorization, requestId);
+  }
+
+  @Get('withdrawals')
+  listWithdrawals(@Query('userId') userId?: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('withdrawal', `/withdrawals${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`, authorization, requestId);
+  }
+
+  @Post('risk/evaluate')
+  evaluateRisk(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('risk', '/risk/evaluate', body, authorization, requestId);
+  }
+
+  @Get('risk/insurance-fund')
+  insuranceFund(@Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('risk', '/risk/insurance-fund', authorization, requestId);
+  }
+
+  @Post('compliance/screen')
+  screenCompliance(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('compliance', '/compliance/screen', body, authorization, requestId);
+  }
+
+  @Get('compliance/regulatory-matrix')
+  regulatoryMatrix(@Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('compliance', '/compliance/regulatory-matrix', authorization, requestId);
+  }
+
+  @Post('notifications')
+  enqueueNotification(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.post('notification', '/notifications', body, authorization, requestId);
+  }
+
+  @Get('notifications')
+  listNotifications(@Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    return this.proxy.get('notification', '/notifications', authorization, requestId);
   }
 }
 

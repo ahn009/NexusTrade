@@ -101,6 +101,22 @@ describe('NexusTrade heavy-use and blockchain flows', () => {
     await expect(wallet.getBalance('heavy-seller', 'USDT')).resolves.toMatchObject({ available: sellerCredit, locked: '0' });
   });
 
+  it('returns completed ledger entries for memory-mode internal transfers', async () => {
+    const wallet = new WalletService(undefined as never, createKafkaMock() as never);
+
+    await wallet.credit({ userId: 'sender', asset: 'USDT', amount: '100.25', referenceId: 'seed-transfer' });
+    const transfer = await wallet.internalTransfer({ userId: 'sender', asset: 'USDT', amount: '40.10', referenceId: 'transfer-1' }, 'receiver');
+
+    expect(transfer.credit).not.toBeInstanceOf(Promise);
+    expect(transfer.debit).toMatchObject({ userId: 'sender', amount: '40.10', balanceAfter: '60.15' });
+    expect(transfer.credit).toMatchObject({ userId: 'receiver', amount: '40.10' });
+    expect(money(transfer.credit.balanceAfter).eq('40.10')).toBe(true);
+    await expect(wallet.getBalance('sender', 'USDT')).resolves.toMatchObject({ available: '60.15', locked: '0' });
+    const receiverBalance = await wallet.getBalance('receiver', 'USDT');
+    expect(money(receiverBalance.available).eq('40.10')).toBe(true);
+    expect(receiverBalance.locked).toBe('0');
+  });
+
   it('enforces blockchain deposit minimums, duplicate tx hashes, and confirmation thresholds', async () => {
     process.env.MIN_DEPOSIT_AMOUNT = '0.00000001';
     const deposits = createRepositoryMock();
@@ -196,7 +212,21 @@ describe('NexusTrade heavy-use and blockchain flows', () => {
       expect(result.withdrawal.status).toBe(testCase.status);
       expect(result.withdrawal.fee).toBe(money(testCase.amount).mul('0.001').toFixed());
       expect(result.event.eventType).toBe(EventType.WithdrawalRequested);
+      if (testCase.tier === 'AUTO') {
+        expect(result.approvalEvent?.eventType).toBe(EventType.WithdrawalApproved);
+      } else {
+        expect(result.approvalEvent).toBeUndefined();
+      }
     }
+
+    const producedEventTypes = kafka.produced.map((entry) => entry.payload.eventType);
+    expect(producedEventTypes).toEqual([
+      EventType.WithdrawalRequested,
+      EventType.WithdrawalApproved,
+      EventType.WithdrawalRequested,
+      EventType.WithdrawalRequested,
+      EventType.WithdrawalRequested
+    ]);
 
     await expect(service.request({
       userId: 'user-1',

@@ -39,17 +39,17 @@
     "decimal.js": "^10.5.0",
     "ethers": "^6.14.4",
     "ioredis": "^5.6.1",
-    "joi": "^17.13.3",
+    "joi": "^18.2.1",
     "jsonwebtoken": "^9.0.2",
     "kafkajs": "^2.2.4",
-    "nodemailer": "^7.0.3",
+    "nodemailer": "^8.0.11",
     "otpauth": "^9.4.0",
     "pg": "^8.16.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "socket.io": "^4.8.1",
     "typeorm": "^0.3.24",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.7",
@@ -63,6 +63,11 @@
     "ts-jest": "^29.3.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.10",
+    "uuid": "^11.1.1",
+    "ws": "^8.20.0"
   },
   "engines": {
     "node": ">=22.0.0",
