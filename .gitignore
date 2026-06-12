@@ -4,6 +4,8 @@ dist/
 .next/
 coverage/
 *.log
+playwright-report/
+test-results/
 
 # Rust build output
 target/
@@ -24,3 +26,5 @@ services/matching-engine/target/
 NexusTrade_Codex_Prompt.txt
 NexusTrade_Exchange_SRD (1).docx
 NexusTrade_Gap_Analysis.docx
+NexusTrade_Gap_Analysis (1).docx
+NexusTrade_Verification_Report*.docx
