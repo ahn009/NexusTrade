@@ -1,5 +1,5 @@
 # infra/docker/rust-matching.Dockerfile
-FROM rust:1.78-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 WORKDIR /app/services/matching-engine
 COPY services/matching-engine .
 RUN apt-get update && apt-get install -y protobuf-compiler && cargo build --release

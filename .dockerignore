@@ -1,0 +1,14 @@
+# .dockerignore
+.git/
+node_modules/
+dist/
+.next/
+coverage/
+test-results/
+playwright-report/
+services/matching-engine/target/
+target/
+*.log
+*.docx
+.env
+.env.*
