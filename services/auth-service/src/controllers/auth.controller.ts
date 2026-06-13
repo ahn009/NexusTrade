@@ -1,6 +1,6 @@
 // services/auth-service/src/controllers/auth.controller.ts
-import { Body, Controller, Get, Headers, Post } from '@nestjs/common';
-import { Public } from '@nexus/shared';
+import { Body, Controller, Get, Headers, Post, Req, UnauthorizedException } from '@nestjs/common';
+import { AuthenticatedRequest, Public } from '@nexus/shared';
 import { LogoutDto, LoginDto, RefreshTokenDto, RegisterDto, TotpVerifyDto } from '../dto/auth.dto';
 import { AuthService } from '../services/auth.service';
 
@@ -39,13 +39,14 @@ export class AuthController {
   }
 
   @Post('auth/totp/setup')
-  setupTotp(@Body('userId') userId: string) {
-    return this.auth.setupTotp(userId);
+  setupTotp(@Req() request: AuthenticatedRequest) {
+    if (!request.user) throw new UnauthorizedException('user JWT is required for TOTP setup');
+    return this.auth.setupTotp(request.user.userId);
   }
 
   @Post('auth/totp/verify')
-  verifyTotp(@Body() dto: TotpVerifyDto) {
-    return this.auth.verifyTotpForUser(dto);
+  verifyTotp(@Req() request: AuthenticatedRequest, @Body() dto: TotpVerifyDto) {
+    return this.auth.verifyTotpForUser({ ...dto, userId: request.user?.userId ?? dto.userId });
   }
 
   @Public()

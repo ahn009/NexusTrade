@@ -13,6 +13,7 @@ import { LogoutDto, LoginDto, RefreshTokenDto, RegisterDto, TotpVerifyDto } from
 @Injectable()
 export class AuthService {
   private loginAttempts = new Map<string, { count: number; resetAt: number }>();
+  private pendingTotpSecrets = new Map<string, { secret: string; expiresAt: number }>();
 
   constructor(
     @InjectRepository(UserEntity) private readonly users: Repository<UserEntity>,
@@ -44,6 +45,9 @@ export class AuthService {
       this.recordFailedLogin(ipAddress);
       throw new HttpException('invalid credentials', HttpStatus.UNAUTHORIZED);
     }
+    if ([UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
+      throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
+    }
     if (user.totpSecret && !this.verifyTotp(user.totpSecret, dto.totpCode ?? '')) {
       this.recordFailedLogin(ipAddress);
       throw new HttpException('totp verification required', HttpStatus.UNAUTHORIZED);
@@ -61,9 +65,10 @@ export class AuthService {
       deviceFingerprint: dto.deviceFingerprint,
       expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
     }));
+    const roles = this.rolesForUser(user);
 
     return {
-      accessToken: jwt.sign({ sub: user.id, sid: sessionId }, jwtSecret, { expiresIn: '15m' }),
+      accessToken: jwt.sign({ sub: user.id, sid: sessionId, roles }, jwtSecret, { expiresIn: '15m' }),
       refreshToken,
       sessionId
     };
@@ -79,12 +84,16 @@ export class AuthService {
     if (!(await bcrypt.compare(dto.refreshToken, session.refreshTokenHash))) {
       throw new HttpException('invalid refresh token', HttpStatus.UNAUTHORIZED);
     }
+    const user = await this.users.findOne({ where: { id: session.userId } });
+    if (!user || [UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
+      throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
+    }
     const nextRefreshToken = randomBytes(48).toString('base64url');
     session.refreshTokenHash = await bcrypt.hash(nextRefreshToken, 12);
     session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     await this.sessions.save(session);
     return {
-      accessToken: jwt.sign({ sub: session.userId, sid: session.id }, jwtSecret, { expiresIn: '15m' }),
+      accessToken: jwt.sign({ sub: session.userId, sid: session.id, roles: this.rolesForUser(user) }, jwtSecret, { expiresIn: '15m' }),
       refreshToken: nextRefreshToken,
       sessionId: session.id
     };
@@ -103,15 +112,32 @@ export class AuthService {
     const user = await this.users.findOne({ where: { id: userId } });
     if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
     const secret = new OTPAuth.Secret({ size: 20 });
-    user.totpSecret = secret.base32;
-    await this.users.save(user);
+    this.pendingTotpSecrets.set(user.id, { secret: secret.base32, expiresAt: Date.now() + 10 * 60 * 1000 });
     const totp = new OTPAuth.TOTP({ issuer: 'NexusTrade', label: user.email, secret });
-    return { secret: secret.base32, uri: totp.toString() };
+    return { secret: secret.base32, uri: totp.toString(), expiresInSeconds: 600 };
   }
 
   async verifyTotpForUser(dto: TotpVerifyDto) {
+    if (!dto.userId) throw new HttpException('userId is required', HttpStatus.UNAUTHORIZED);
     const user = await this.users.findOne({ where: { id: dto.userId } });
-    if (!user?.totpSecret) throw new HttpException('totp not configured', HttpStatus.BAD_REQUEST);
+    if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
+
+    const pending = this.pendingTotpSecrets.get(user.id);
+    if (pending) {
+      if (pending.expiresAt <= Date.now()) {
+        this.pendingTotpSecrets.delete(user.id);
+        throw new HttpException('pending totp setup expired', HttpStatus.BAD_REQUEST);
+      }
+      const verified = this.verifyTotp(pending.secret, dto.code);
+      if (verified) {
+        user.totpSecret = pending.secret;
+        await this.users.save(user);
+        this.pendingTotpSecrets.delete(user.id);
+      }
+      return { verified };
+    }
+
+    if (!user.totpSecret) throw new HttpException('totp not configured', HttpStatus.BAD_REQUEST);
     return { verified: this.verifyTotp(user.totpSecret, dto.code) };
   }
 
@@ -140,4 +166,18 @@ export class AuthService {
     }
     current.count += 1;
   }
+
+  private rolesForUser(user: UserEntity) {
+    const adminEmails = parseEmailList(process.env.ADMIN_EMAILS);
+    const operatorEmails = parseEmailList(process.env.OPERATOR_EMAILS);
+    return [
+      'user',
+      ...(adminEmails.has(user.email.toLowerCase()) ? ['admin'] : []),
+      ...(operatorEmails.has(user.email.toLowerCase()) ? ['operator'] : [])
+    ];
+  }
+}
+
+function parseEmailList(value?: string) {
+  return new Set((value ?? '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean));
 }

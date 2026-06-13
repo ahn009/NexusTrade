@@ -1,7 +1,7 @@
 // services/trading-service/src/services/trading.service.ts
 import { HttpException, HttpStatus, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { OrderEntity, TradeEntity } from '@nexus/database';
+import { AccountEntity, OrderEntity, TradeEntity, UserEntity } from '@nexus/database';
 import { randomUUID } from 'crypto';
 import {
   createEvent,
@@ -16,7 +16,8 @@ import {
   OrderType,
   requireDecimalString,
   requireSymbol,
-  Trade
+  Trade,
+  UserStatus
 } from '@nexus/shared';
 import { In, Repository } from 'typeorm';
 import { PlaceOrderDto } from '../dto/trading.dto';
@@ -54,6 +55,8 @@ export class TradingService implements OnModuleDestroy, OnModuleInit {
   constructor(
     @InjectRepository(OrderEntity) private readonly orderRepository: Repository<OrderEntity>,
     @InjectRepository(TradeEntity) private readonly tradeRepository: Repository<TradeEntity>,
+    @InjectRepository(UserEntity) private readonly userRepository: Repository<UserEntity>,
+    @InjectRepository(AccountEntity) private readonly accountRepository: Repository<AccountEntity>,
     private readonly gateway: TradingGateway,
     private readonly kafka: KafkaService
   ) {}
@@ -95,6 +98,7 @@ export class TradingService implements OnModuleDestroy, OnModuleInit {
   }
 
   async placeOrder(dto: PlaceOrderDto) {
+    await this.assertCanTrade(dto.userId, dto.accountId);
     const symbol = requireSymbol(dto.symbol);
     const [baseAsset, quoteAsset] = splitSymbol(symbol);
     const price = dto.price ? requireDecimalString(dto.price, 'price') : undefined;
@@ -368,6 +372,19 @@ export class TradingService implements OnModuleDestroy, OnModuleInit {
 
   private shouldRest(order: StoredOrder) {
     return money(order.quantity).minus(order.filledQuantity).gt(0) && [OrderStatus.New, OrderStatus.PartiallyFilled].includes(order.status);
+  }
+
+  private async assertCanTrade(userId: string, accountId: string) {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
+    if ([UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
+      throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
+    }
+    const account = await this.accountRepository.findOne({ where: { id: accountId, userId } });
+    if (!account) throw new HttpException('account not found', HttpStatus.NOT_FOUND);
+    if (account.isFrozen) {
+      throw new HttpException('account is frozen', HttpStatus.FORBIDDEN);
+    }
   }
 }
 

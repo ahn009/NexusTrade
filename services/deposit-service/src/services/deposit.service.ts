@@ -1,9 +1,9 @@
 // services/deposit-service/src/services/deposit.service.ts
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DepositEntity } from '@nexus/database';
+import { DepositEntity, UserEntity } from '@nexus/database';
 import { createHash, randomUUID } from 'crypto';
-import { createEvent, Deposit, EventType, KafkaService, KafkaTopics, money, TransactionStatus } from '@nexus/shared';
+import { createEvent, Deposit, EventType, KafkaService, KafkaTopics, money, TransactionStatus, UserStatus } from '@nexus/shared';
 import { Repository } from 'typeorm';
 import { AddressRequestDto, SimulateDepositDto } from '../dto/deposit.dto';
 
@@ -11,7 +11,8 @@ import { AddressRequestDto, SimulateDepositDto } from '../dto/deposit.dto';
 export class DepositService {
   constructor(
     @InjectRepository(DepositEntity) private readonly deposits: Repository<DepositEntity>,
-    private readonly kafka: KafkaService
+    private readonly kafka: KafkaService,
+    @InjectRepository(UserEntity) private readonly users?: Repository<UserEntity>
   ) {}
 
   generateAddress(dto: AddressRequestDto) {
@@ -21,6 +22,7 @@ export class DepositService {
   }
 
   async simulateDeposit(dto: SimulateDepositDto) {
+    await this.assertUserCanTransact(dto.userId);
     const duplicate = await this.deposits.findOne({ where: { txHash: dto.txHash } });
     if (duplicate) throw new HttpException('deposit txHash already processed', HttpStatus.CONFLICT);
     const minimum = money(process.env.MIN_DEPOSIT_AMOUNT ?? '0.00000001');
@@ -47,6 +49,7 @@ export class DepositService {
   async confirm(id: string, confirmations: number) {
     const deposit = await this.deposits.findOne({ where: { id } });
     if (!deposit) return { found: false };
+    await this.assertUserCanTransact(deposit.userId);
     deposit.confirmations = confirmations;
     if (confirmations >= deposit.requiredConfirmations) deposit.status = TransactionStatus.Confirmed;
     await this.deposits.save(deposit);
@@ -58,5 +61,14 @@ export class DepositService {
 
   list(userId?: string) {
     return this.deposits.find({ where: userId ? { userId } : {}, order: { createdAt: 'DESC' } });
+  }
+
+  private async assertUserCanTransact(userId: string) {
+    if (!this.users) return;
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
+    if ([UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
+      throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
+    }
   }
 }

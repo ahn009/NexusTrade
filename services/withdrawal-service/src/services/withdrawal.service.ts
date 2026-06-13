@@ -1,9 +1,9 @@
 // services/withdrawal-service/src/services/withdrawal.service.ts
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { WithdrawalAddressEntity, WithdrawalEntity } from '@nexus/database';
+import { UserEntity, WithdrawalAddressEntity, WithdrawalEntity } from '@nexus/database';
 import { randomUUID } from 'crypto';
-import { createEvent, EventType, KafkaService, KafkaTopics, money, TransactionStatus, Withdrawal } from '@nexus/shared';
+import { createEvent, EventType, KafkaService, KafkaTopics, money, TransactionStatus, UserStatus, Withdrawal } from '@nexus/shared';
 import { Repository } from 'typeorm';
 import { WithdrawalDto } from '../dto/withdrawal.dto';
 
@@ -15,10 +15,12 @@ export class WithdrawalService {
   constructor(
     @InjectRepository(WithdrawalEntity) private readonly withdrawals: Repository<WithdrawalEntity>,
     @InjectRepository(WithdrawalAddressEntity) private readonly addresses: Repository<WithdrawalAddressEntity>,
-    private readonly kafka: KafkaService
+    private readonly kafka: KafkaService,
+    @InjectRepository(UserEntity) private readonly users?: Repository<UserEntity>
   ) {}
 
   async whitelist(userId: string, body: { asset?: string; network?: string; address: string; label?: string }) {
+    await this.assertUserCanTransact(userId);
     const asset = body.asset ?? 'USDT';
     const network = body.network ?? 'ETH';
     const existing = await this.addresses.findOne({ where: { userId, asset, network, address: body.address } });
@@ -27,6 +29,7 @@ export class WithdrawalService {
   }
 
   async request(dto: WithdrawalDto) {
+    await this.assertUserCanTransact(dto.userId);
     await this.verifyTotp(dto.userId, dto.totpCode);
     const whitelistedAddress = await this.addresses.findOne({ where: { userId: dto.userId, asset: dto.asset, network: dto.network, address: dto.address } });
     if (!whitelistedAddress) {
@@ -63,6 +66,7 @@ export class WithdrawalService {
   async approve(id: string, approverId: string) {
     const withdrawal = await this.withdrawals.findOne({ where: { id } });
     if (!withdrawal) return { found: false };
+    await this.assertUserCanTransact(withdrawal.userId);
     withdrawal.status = TransactionStatus.Confirmed;
     await this.withdrawals.save(withdrawal);
     const event = createEvent(EventType.WithdrawalApproved, id, withdrawal, 'withdrawal-service', { userId: withdrawal.userId });
@@ -73,6 +77,7 @@ export class WithdrawalService {
   async reject(id: string, approverId: string) {
     const withdrawal = await this.withdrawals.findOne({ where: { id } });
     if (!withdrawal) return { found: false };
+    await this.assertUserCanTransact(withdrawal.userId);
     withdrawal.status = TransactionStatus.Failed;
     await this.withdrawals.save(withdrawal);
     return { approverId, withdrawal };
@@ -100,6 +105,15 @@ export class WithdrawalService {
     const payload = await response.json().catch(() => ({ verified: false }));
     if (!payload.verified) {
       throw new HttpException('invalid totp code', HttpStatus.UNAUTHORIZED);
+    }
+  }
+
+  private async assertUserCanTransact(userId: string) {
+    if (!this.users) return;
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
+    if ([UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
+      throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
     }
   }
 

@@ -1,7 +1,7 @@
 // services/wallet-service/src/services/wallet.service.ts
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { LedgerTransactionEntity, WalletEntity } from '@nexus/database';
-import { add, assertNonNegative, Deposit, EventType, KafkaEvent, KafkaService, KafkaTopics, money, subtract, TransactionStatus, TransactionType, WalletType, Withdrawal } from '@nexus/shared';
+import { HttpException, HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { LedgerTransactionEntity, UserEntity, WalletEntity } from '@nexus/database';
+import { add, assertNonNegative, Deposit, EventType, KafkaEvent, KafkaService, KafkaTopics, money, subtract, TransactionStatus, TransactionType, UserStatus, WalletType, Withdrawal } from '@nexus/shared';
 import { DataSource, EntityManager } from 'typeorm';
 import { BalanceLeg, BalanceMutationDto, SettlementDto } from '../dto/wallet.dto';
 
@@ -55,6 +55,7 @@ export class WalletService implements OnModuleInit {
   async credit(dto: BalanceMutationDto, type: TransactionType = TransactionType.Deposit) {
     if (this.dataSource) {
       return this.withTransaction(async (manager) => {
+        await this.assertUserCanTransact(manager, dto.userId);
         const wallet = await this.adjustAvailable(manager, dto.userId, dto.asset, dto.amount);
         await this.recordTypeOrm(manager, dto, type, wallet.available);
         return { ...dto, type, balanceAfter: wallet.available, createdAt: new Date().toISOString() };
@@ -70,6 +71,7 @@ export class WalletService implements OnModuleInit {
   async debit(dto: BalanceMutationDto, type: TransactionType = TransactionType.Withdrawal) {
     if (this.dataSource) {
       return this.withTransaction(async (manager) => {
+        await this.assertUserCanTransact(manager, dto.userId);
         const wallet = await this.adjustAvailable(manager, dto.userId, dto.asset, money(dto.amount).negated().toFixed());
         await this.recordTypeOrm(manager, { ...dto, amount: money(dto.amount).negated().toFixed() }, type, wallet.available);
         return { ...dto, type, balanceAfter: wallet.available, createdAt: new Date().toISOString() };
@@ -87,6 +89,7 @@ export class WalletService implements OnModuleInit {
   async lock(dto: BalanceMutationDto) {
     if (this.dataSource) {
       return this.withTransaction(async (manager) => {
+        await this.assertUserCanTransact(manager, dto.userId);
         const wallet = await this.adjustAvailable(manager, dto.userId, dto.asset, money(dto.amount).negated().toFixed());
         wallet.locked = add(wallet.locked, dto.amount);
         await manager.getRepository(WalletEntity).save(wallet);
@@ -107,6 +110,7 @@ export class WalletService implements OnModuleInit {
   async unlock(dto: BalanceMutationDto) {
     if (this.dataSource) {
       return this.withTransaction(async (manager) => {
+        await this.assertUserCanTransact(manager, dto.userId);
         const wallet = await this.adjustLocked(manager, dto.userId, dto.asset, money(dto.amount).negated().toFixed());
         wallet.available = add(wallet.available, dto.amount);
         await manager.getRepository(WalletEntity).save(wallet);
@@ -127,6 +131,8 @@ export class WalletService implements OnModuleInit {
   async internalTransfer(from: BalanceMutationDto, toUserId: string) {
     if (this.dataSource) {
       return this.withTransaction(async (manager) => {
+        await this.assertUserCanTransact(manager, from.userId);
+        await this.assertUserCanTransact(manager, toUserId);
         const debitWallet = await this.adjustAvailable(manager, from.userId, from.asset, money(from.amount).negated().toFixed());
         const creditWallet = await this.adjustAvailable(manager, toUserId, from.asset, from.amount);
         await this.recordTypeOrm(manager, from, TransactionType.InternalTransfer, debitWallet.available);
@@ -167,6 +173,8 @@ export class WalletService implements OnModuleInit {
 
     if (this.dataSource) {
       await this.withTransaction(async (manager) => {
+        await this.assertUserCanTransact(manager, dto.makerUserId);
+        await this.assertUserCanTransact(manager, dto.takerUserId);
         for (const leg of legs) {
           const wallet = leg.bucket === 'available'
             ? await this.adjustAvailable(manager, leg.userId, leg.asset, leg.amount)
@@ -223,6 +231,17 @@ export class WalletService implements OnModuleInit {
       await repository.save(wallet);
     }
     return wallet;
+  }
+
+  private async assertUserCanTransact(manager: EntityManager, userId: string) {
+    const user = await manager.getRepository(UserEntity).findOne({
+      where: { id: userId },
+      lock: { mode: 'pessimistic_read' }
+    });
+    if (!user) throw new HttpException('user not found', HttpStatus.NOT_FOUND);
+    if ([UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
+      throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
+    }
   }
 
   private async adjustAvailable(manager: EntityManager, userId: string, asset: string, amount: string) {

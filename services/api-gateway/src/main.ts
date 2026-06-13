@@ -1,6 +1,6 @@
 // services/api-gateway/src/main.ts
 import 'reflect-metadata';
-import { Body, CanActivate, Controller, ExecutionContext, Get, Headers, HttpException, HttpStatus, Injectable, Module, Param, Patch, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, CanActivate, Controller, ExecutionContext, ForbiddenException, Get, Headers, HttpException, HttpStatus, Injectable, Module, Param, Patch, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -171,6 +171,7 @@ class GatewayController {
   account(@Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string, @Query('userId') queryUserId?: string) {
     const userId = queryUserId ?? userIdFromAuthorization(authorization);
     if (!userId) throw new UnauthorizedException('userId is required for API key account requests');
+    if (queryUserId) assertSelfOrPrivileged(authorization, queryUserId);
     return this.proxy.get('wallet', `/wallets/${encodeURIComponent(userId)}`, authorization, requestId);
   }
 
@@ -203,6 +204,7 @@ class GatewayController {
     const symbol = typeof body.symbol === 'string' ? body.symbol : normalizePair(String(body.pair ?? 'BTCUSDT'));
     const userId = typeof body.userId === 'string' ? body.userId : userIdFromAuthorization(authorization);
     if (!userId) throw new UnauthorizedException('userId is required for API key order requests');
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.post(
       'trading',
       '/orders',
@@ -229,6 +231,7 @@ class GatewayController {
 
   @Post('wallets/credit')
   credit(@Body() body: { userId: string; asset: string; amount: string; referenceId?: string }, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    requirePrivilegedRole(authorization);
     return this.proxy.post('wallet', '/wallets/credit', {
       userId: body.userId,
       asset: body.asset,
@@ -239,81 +242,99 @@ class GatewayController {
 
   @Get('users/:userId/profile')
   getUserProfile(@Param('userId') userId: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.get('user', `/users/${encodeURIComponent(userId)}/profile`, authorization, requestId);
   }
 
   @Post('users/:userId/profile')
   upsertUserProfile(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/profile`, body, authorization, requestId);
   }
 
   @Post('users/:userId/kyc')
   submitKyc(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/kyc`, body, authorization, requestId);
   }
 
   @Patch('users/:userId/kyc/:status')
   reviewKyc(@Param('userId') userId: string, @Param('status') status: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    requirePrivilegedRole(authorization);
     return this.proxy.patch('user', `/users/${encodeURIComponent(userId)}/kyc/${encodeURIComponent(status)}`, {}, authorization, requestId);
   }
 
   @Patch('users/:userId/tier/:tier')
   setTier(@Param('userId') userId: string, @Param('tier') tier: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    requirePrivilegedRole(authorization);
     return this.proxy.patch('user', `/users/${encodeURIComponent(userId)}/tier/${encodeURIComponent(tier)}`, {}, authorization, requestId);
   }
 
   @Post('users/:userId/referrals/:referredUserId')
   addReferral(@Param('userId') userId: string, @Param('referredUserId') referredUserId: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/referrals/${encodeURIComponent(referredUserId)}`, {}, authorization, requestId);
   }
 
   @Post('users/:userId/address-book')
   addAddressBookEntry(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.post('user', `/users/${encodeURIComponent(userId)}/address-book`, body, authorization, requestId);
   }
 
   @Post('deposits/address')
   depositAddress(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, String(body.userId ?? ''));
     return this.proxy.post('deposit', '/deposits/address', body, authorization, requestId);
   }
 
   @Post('deposits/simulate')
   simulateDeposit(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, String(body.userId ?? ''));
     return this.proxy.post('deposit', '/deposits/simulate', body, authorization, requestId);
   }
 
   @Post('deposits/:id/confirm/:confirmations')
   confirmDeposit(@Param('id') id: string, @Param('confirmations') confirmations: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    requirePrivilegedRole(authorization);
     return this.proxy.post('deposit', `/deposits/${encodeURIComponent(id)}/confirm/${encodeURIComponent(confirmations)}`, {}, authorization, requestId);
   }
 
   @Get('deposits')
   listDeposits(@Query('userId') userId?: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    if (userId) assertSelfOrPrivileged(authorization, userId);
+    else requirePrivilegedRole(authorization);
     return this.proxy.get('deposit', `/deposits${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`, authorization, requestId);
   }
 
   @Post('withdrawals/whitelist/:userId')
   whitelistWithdrawalAddress(@Param('userId') userId: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, userId);
     return this.proxy.post('withdrawal', `/withdrawals/whitelist/${encodeURIComponent(userId)}`, body, authorization, requestId);
   }
 
   @Post('withdrawals')
   requestWithdrawal(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    assertSelfOrPrivileged(authorization, String(body.userId ?? ''));
     return this.proxy.post('withdrawal', '/withdrawals', body, authorization, requestId);
   }
 
   @Post('withdrawals/:id/approve')
   approveWithdrawal(@Param('id') id: string, @Body() body: { approverId?: string }, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    requirePrivilegedRole(authorization);
     return this.proxy.post('withdrawal', `/withdrawals/${encodeURIComponent(id)}/approve`, body, authorization, requestId);
   }
 
   @Post('withdrawals/:id/reject')
   rejectWithdrawal(@Param('id') id: string, @Body() body: { approverId?: string }, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    requirePrivilegedRole(authorization);
     return this.proxy.post('withdrawal', `/withdrawals/${encodeURIComponent(id)}/reject`, body, authorization, requestId);
   }
 
   @Get('withdrawals')
   listWithdrawals(@Query('userId') userId?: string, @Headers('authorization') authorization?: string, @Headers('x-request-id') requestId?: string) {
+    if (userId) assertSelfOrPrivileged(authorization, userId);
+    else requirePrivilegedRole(authorization);
     return this.proxy.get('withdrawal', `/withdrawals${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`, authorization, requestId);
   }
 
@@ -358,6 +379,32 @@ function normalizePair(symbol: string): string {
 function userIdFromAuthorization(authorization?: string): string | undefined {
   const token = extractBearerToken(authorization);
   return token ? verifyJwtToken(token).userId : undefined;
+}
+
+function currentUserFromAuthorization(authorization?: string): { userId: string; roles: string[] } {
+  const token = extractBearerToken(authorization);
+  if (!token) throw new UnauthorizedException('bearer token is required');
+  return verifyJwtToken(token);
+}
+
+function requirePrivilegedRole(authorization?: string) {
+  const user = currentUserFromAuthorization(authorization);
+  if (!hasPrivilegedRole(user.roles)) {
+    throw new ForbiddenException('admin or operator role is required');
+  }
+  return user;
+}
+
+function assertSelfOrPrivileged(authorization: string | undefined, targetUserId: string) {
+  if (!targetUserId) throw new UnauthorizedException('userId is required');
+  const user = currentUserFromAuthorization(authorization);
+  if (user.userId !== targetUserId && !hasPrivilegedRole(user.roles)) {
+    throw new ForbiddenException('cannot access another user account');
+  }
+}
+
+function hasPrivilegedRole(roles: string[]) {
+  return roles.includes('admin') || roles.includes('operator');
 }
 
 @Module({ controllers: [GatewayController], providers: [GatewayAuthGuard, GatewayRateGuard, GatewayProxy] })

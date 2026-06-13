@@ -21,8 +21,9 @@ export class LoginDto extends RegisterDto {
 }
 
 export class TotpVerifyDto {
+  @IsOptional()
   @IsString()
-  userId!: string;
+  userId?: string;
 
   @IsString()
   code!: string;
