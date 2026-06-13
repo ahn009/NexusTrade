@@ -1,6 +1,7 @@
 // packages/shared/src/modules/KafkaModule.ts
 import { Global, Injectable, Logger, Module, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Consumer, EachMessagePayload, Kafka, Producer } from 'kafkajs';
+import { Consumer, EachMessagePayload, Kafka, KafkaConfig, Producer } from 'kafkajs';
+import { readFileSync } from 'fs';
 
 export interface KafkaConsumeOptions {
   topic: string;
@@ -14,7 +15,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KafkaService.name);
   private readonly brokers = (process.env.KAFKA_BROKERS ?? 'localhost:9092').split(',').map((broker) => broker.trim()).filter(Boolean);
   private readonly dlqTopic = process.env.KAFKA_DLQ_TOPIC ?? 'nexus.dlq';
-  private readonly kafka = new Kafka({ clientId: process.env.KAFKA_CLIENT_ID ?? 'nexustrade-service', brokers: this.brokers });
+  private readonly kafka = new Kafka(createKafkaConfig(this.brokers));
   private readonly producer: Producer = this.kafka.producer();
   private readonly consumers: Consumer[] = [];
   private producerConnected = false;
@@ -115,4 +116,32 @@ function delay(ms: number): Promise<void> {
 
 function nextOffset(offset: string): string {
   return (BigInt(offset) + 1n).toString();
+}
+
+function createKafkaConfig(brokers: string[]): KafkaConfig {
+  const config: KafkaConfig = {
+    clientId: process.env.KAFKA_CLIENT_ID ?? 'nexustrade-service',
+    brokers
+  };
+  if (process.env.KAFKA_SSL === 'true') {
+    config.ssl = {
+      rejectUnauthorized: process.env.KAFKA_SSL_REJECT_UNAUTHORIZED !== 'false',
+      ca: process.env.KAFKA_SSL_CA_PATH ? [readFileSync(process.env.KAFKA_SSL_CA_PATH, 'utf8')] : undefined,
+      cert: process.env.KAFKA_SSL_CERT_PATH ? readFileSync(process.env.KAFKA_SSL_CERT_PATH, 'utf8') : undefined,
+      key: process.env.KAFKA_SSL_KEY_PATH ? readFileSync(process.env.KAFKA_SSL_KEY_PATH, 'utf8') : undefined
+    };
+  }
+  const mechanism = process.env.KAFKA_SASL_MECHANISM;
+  if (mechanism) {
+    const username = process.env.KAFKA_SASL_USERNAME;
+    const password = process.env.KAFKA_SASL_PASSWORD;
+    if (!username || !password) {
+      throw new Error('KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD are required when KAFKA_SASL_MECHANISM is set');
+    }
+    if (!['plain', 'scram-sha-256', 'scram-sha-512'].includes(mechanism)) {
+      throw new Error(`unsupported KAFKA_SASL_MECHANISM: ${mechanism}`);
+    }
+    config.sasl = { mechanism, username, password } as KafkaConfig['sasl'];
+  }
+  return config;
 }

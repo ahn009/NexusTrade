@@ -3,8 +3,20 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 
 const DEFAULT_ALLOWED_DEV_ORIGINS = [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/];
+const SENSITIVE_SECRET_KEYS = ['JWT_SECRET', 'SERVICE_AUTH_TOKEN', 'API_KEY_SECRET', 'DATABASE_PASSWORD'];
+const UNSAFE_SECRET_VALUES = new Set([
+  'replace-me',
+  'replace-with-strong-secret',
+  'replace-with-internal-service-token',
+  'replace-with-api-key-secret',
+  'local-jwt-secret-change-me',
+  'local-service-token',
+  'local-api-key-secret',
+  'nexus'
+]);
 
 export function configureHttpSecurity(app: INestApplication) {
+  assertSafeProductionSecrets();
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
   app.use((req: { headers: Record<string, string | string[] | undefined> }, res: { setHeader: (name: string, value: string) => void }, next: () => void) => {
     const incoming = req.headers['x-request-id'];
@@ -40,4 +52,15 @@ export function isAllowedOrigin(origin?: string): boolean {
     .filter(Boolean);
   if (configured.includes(origin)) return true;
   return process.env.NODE_ENV !== 'production' && DEFAULT_ALLOWED_DEV_ORIGINS.some((pattern) => pattern.test(origin));
+}
+
+export function assertSafeProductionSecrets() {
+  if (process.env.NODE_ENV !== 'production') return;
+  const unsafeKeys = SENSITIVE_SECRET_KEYS.filter((key) => {
+    const value = process.env[key]?.trim();
+    return !value || UNSAFE_SECRET_VALUES.has(value) || value.toLowerCase().includes('change-me');
+  });
+  if (unsafeKeys.length > 0) {
+    throw new Error(`unsafe production secret configuration: ${unsafeKeys.join(', ')}`);
+  }
 }

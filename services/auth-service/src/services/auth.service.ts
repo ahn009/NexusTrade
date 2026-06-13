@@ -39,19 +39,25 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, ipAddress = 'unknown') {
-    this.enforceRateLimit(ipAddress);
-    const user = await this.users.findOne({ where: { email: dto.email.toLowerCase() } });
+    const email = dto.email.toLowerCase();
+    this.enforceRateLimit(`ip:${ipAddress}`);
+    this.enforceRateLimit(`account:${email}`);
+    const user = await this.users.findOne({ where: { email } });
     if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
-      this.recordFailedLogin(ipAddress);
+      this.recordFailedLogin(`ip:${ipAddress}`);
+      this.recordFailedLogin(`account:${email}`);
       throw new HttpException('invalid credentials', HttpStatus.UNAUTHORIZED);
     }
     if ([UserStatus.Frozen, UserStatus.Closed].includes(user.status)) {
       throw new HttpException('account is not active', HttpStatus.FORBIDDEN);
     }
     if (user.totpSecret && !this.verifyTotp(user.totpSecret, dto.totpCode ?? '')) {
-      this.recordFailedLogin(ipAddress);
+      this.recordFailedLogin(`ip:${ipAddress}`);
+      this.recordFailedLogin(`account:${email}`);
       throw new HttpException('totp verification required', HttpStatus.UNAUTHORIZED);
     }
+    this.loginAttempts.delete(`ip:${ipAddress}`);
+    this.loginAttempts.delete(`account:${email}`);
 
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new HttpException('JWT_SECRET is not configured', HttpStatus.INTERNAL_SERVER_ERROR);

@@ -1,5 +1,5 @@
 // services/auth-service/src/dto/auth.dto.ts
-import { IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, Matches, MinLength } from 'class-validator';
 
 export class RegisterDto {
   @IsEmail()
@@ -7,6 +7,9 @@ export class RegisterDto {
 
   @IsString()
   @MinLength(12)
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).+$/, {
+    message: 'password must include uppercase, lowercase, number, and special character'
+  })
   password!: string;
 }
 

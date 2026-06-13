@@ -1,7 +1,7 @@
 // packages/shared/src/grpc/matching-client.ts
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { OrderSide, OrderType } from '../types/domain';
 
@@ -90,6 +90,10 @@ export interface GrpcMatchingClientOptions {
   maxRetries?: number;
   initialRetryMs?: number;
   readyTimeoutMs?: number;
+  tls?: boolean;
+  caPath?: string;
+  certPath?: string;
+  keyPath?: string;
 }
 
 export class GrpcMatchingClient implements MatchingEngineClient {
@@ -98,6 +102,10 @@ export class GrpcMatchingClient implements MatchingEngineClient {
   private readonly maxRetries: number;
   private readonly initialRetryMs: number;
   private readonly readyTimeoutMs: number;
+  private readonly tls: boolean;
+  private readonly caPath?: string;
+  private readonly certPath?: string;
+  private readonly keyPath?: string;
   private client: GrpcClient;
 
   constructor(options: GrpcMatchingClientOptions = {}) {
@@ -106,6 +114,10 @@ export class GrpcMatchingClient implements MatchingEngineClient {
     this.maxRetries = options.maxRetries ?? 3;
     this.initialRetryMs = options.initialRetryMs ?? 100;
     this.readyTimeoutMs = options.readyTimeoutMs ?? 1500;
+    this.tls = options.tls ?? process.env.MATCHING_ENGINE_GRPC_TLS === 'true';
+    this.caPath = options.caPath ?? process.env.MATCHING_ENGINE_GRPC_CA_PATH;
+    this.certPath = options.certPath ?? process.env.MATCHING_ENGINE_GRPC_CERT_PATH;
+    this.keyPath = options.keyPath ?? process.env.MATCHING_ENGINE_GRPC_KEY_PATH;
     this.client = this.createClient();
   }
 
@@ -191,7 +203,15 @@ export class GrpcMatchingClient implements MatchingEngineClient {
       oneofs: true
     });
     const root = grpc.loadPackageDefinition(packageDefinition) as unknown as MatchingProtoRoot;
-    return new root.nexus.matching.MatchingEngine(this.address, grpc.credentials.createInsecure()) as GrpcClient;
+    return new root.nexus.matching.MatchingEngine(this.address, this.createCredentials()) as GrpcClient;
+  }
+
+  private createCredentials(): grpc.ChannelCredentials {
+    if (!this.tls) return grpc.credentials.createInsecure();
+    const rootCerts = this.caPath ? readFileSync(this.caPath) : undefined;
+    const privateKey = this.keyPath ? readFileSync(this.keyPath) : undefined;
+    const certChain = this.certPath ? readFileSync(this.certPath) : undefined;
+    return grpc.credentials.createSsl(rootCerts, privateKey, certChain);
   }
 
   private async unary<TResponse>(method: string, request: Record<string, unknown>): Promise<TResponse> {

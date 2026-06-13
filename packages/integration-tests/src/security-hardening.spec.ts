@@ -2,8 +2,11 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import * as OTPAuth from 'otpauth';
+import { validate } from 'class-validator';
+import { RegisterDto } from '../../../services/auth-service/src/dto/auth.dto';
 import { AuthController } from '../../../services/auth-service/src/controllers/auth.controller';
 import { AuthService } from '../../../services/auth-service/src/services/auth.service';
+import { assertSafeProductionSecrets } from '@nexus/shared';
 import { UserStatus } from '@nexus/shared';
 
 const root = resolve(__dirname, '../../..');
@@ -40,6 +43,11 @@ describe('critical security hardening regressions', () => {
     jest.restoreAllMocks();
     delete process.env.ADMIN_EMAILS;
     delete process.env.OPERATOR_EMAILS;
+    delete process.env.NODE_ENV;
+    delete process.env.JWT_SECRET;
+    delete process.env.SERVICE_AUTH_TOKEN;
+    delete process.env.API_KEY_SECRET;
+    delete process.env.DATABASE_PASSWORD;
   });
 
   it('keeps TOTP secrets pending until the authenticated user verifies setup', async () => {
@@ -109,5 +117,50 @@ describe('critical security hardening regressions', () => {
     expect(readSource('services/deposit-service/src/services/deposit.service.ts')).toContain('private async assertUserCanTransact');
     expect(readSource('services/withdrawal-service/src/services/withdrawal.service.ts')).toContain('private async assertUserCanTransact');
     expect(readSource('services/trading-service/src/services/trading.service.ts')).toContain('account.isFrozen');
+  });
+
+  it('rejects weak registration passwords at the DTO validation layer', async () => {
+    const weak = new RegisterDto();
+    weak.email = 'user@example.com';
+    weak.password = 'longbutweakpassword';
+    await expect(validate(weak)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ property: 'password' })
+    ]));
+
+    const strong = new RegisterDto();
+    strong.email = 'user@example.com';
+    strong.password = 'StrongerPassword1!';
+    await expect(validate(strong)).resolves.toHaveLength(0);
+  });
+
+  it('fails fast on unsafe production secret defaults', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.JWT_SECRET = 'local-jwt-secret-change-me';
+    process.env.SERVICE_AUTH_TOKEN = 'local-service-token';
+    process.env.API_KEY_SECRET = 'local-api-key-secret';
+    process.env.DATABASE_PASSWORD = 'nexus';
+    expect(() => assertSafeProductionSecrets()).toThrow('unsafe production secret configuration');
+
+    process.env.JWT_SECRET = 'prod-jwt-secret-at-least-unique';
+    process.env.SERVICE_AUTH_TOKEN = 'prod-service-token-at-least-unique';
+    process.env.API_KEY_SECRET = 'prod-api-key-secret-at-least-unique';
+    process.env.DATABASE_PASSWORD = 'prod-database-password-at-least-unique';
+    expect(() => assertSafeProductionSecrets()).not.toThrow();
+  });
+
+  it('keeps high-severity transport and lockout hardening hooks wired', () => {
+    const auth = readSource('services/auth-service/src/services/auth.service.ts');
+    expect(auth).toContain('this.enforceRateLimit(`account:${email}`)');
+    expect(auth).toContain('this.recordFailedLogin(`account:${email}`)');
+    expect(auth).toContain('this.loginAttempts.delete(`account:${email}`)');
+
+    const grpc = readSource('packages/shared/src/grpc/matching-client.ts');
+    expect(grpc).toContain('MATCHING_ENGINE_GRPC_TLS');
+    expect(grpc).toContain('grpc.credentials.createSsl');
+
+    const kafka = readSource('packages/shared/src/modules/KafkaModule.ts');
+    expect(kafka).toContain('KAFKA_SSL');
+    expect(kafka).toContain('KAFKA_SASL_MECHANISM');
+    expect(kafka).toContain('KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD are required');
   });
 });
