@@ -6,13 +6,18 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: '#f7f8fa',
-        foreground: '#17202a',
-        muted: '#657386',
-        line: '#d9e0e8',
-        accent: '#0d9488',
-        warning: '#b45309',
-        danger: '#b91c1c'
+        app: '#f5f6f8',
+        panel: '#ffffff',
+        soft: '#f0f2f5',
+        chart: '#fafafa',
+        ink: '#181a20',
+        foreground: '#1e2329',
+        muted: '#707a8a',
+        line: '#e5e7eb',
+        accent: '#f0b90b',
+        warning: '#c99400',
+        positive: '#0ecb81',
+        danger: '#f6465d'
       }
     }
   },

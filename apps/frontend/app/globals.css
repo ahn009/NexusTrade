@@ -6,10 +6,22 @@
 html,
 body {
   min-height: 100%;
-  background: #f7f8fa;
-  color: #17202a;
+  background: #f5f6f8;
+  color: #1e2329;
 }
 
 * {
   box-sizing: border-box;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chart-grid {
+  background-image:
+    linear-gradient(to right, rgba(132, 142, 156, 0.12) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(132, 142, 156, 0.12) 1px, transparent 1px);
+  background-size: 56px 42px;
 }

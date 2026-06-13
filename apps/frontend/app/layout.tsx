@@ -3,8 +3,8 @@ import './globals.css';
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'NexusTrade Admin',
-  description: 'Operational dashboard for NexusTrade Exchange'
+  title: 'NexusTrade Exchange',
+  description: 'Crypto exchange trading, custody, risk, and operations console'
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
